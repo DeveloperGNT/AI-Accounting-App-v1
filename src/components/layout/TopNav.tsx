@@ -16,6 +16,9 @@ import {
   Menu,
 } from 'lucide-react';
 import { useAccounting } from '../../context/AccountingContext';
+import { useAppSelector } from '../../app/hooks';
+import { useAppDispatch } from '../../app/hooks';
+import { logout } from '../../features/auth/authSlice';
 
 interface TopNavProps {
   currentRoute: string;
@@ -32,15 +35,36 @@ export const TopNav: React.FC<TopNavProps> = ({
   openNotifications,
   openMobileMenu,
 }) => {
+  const dispatch = useAppDispatch();
   const {
     currentUser,
     currentOrg,
     organizations,
     switchOrganization,
-    logout,
     notifications,
     metrics,
   } = useAccounting();
+  const authUser = useAppSelector((state) => state.auth.user);
+  const userProfile = useAppSelector((state) => state.users.currentProfile);
+  const orgsStatus = useAppSelector((state) => state.organizations.status);
+  const orgsError = useAppSelector((state) => state.organizations.error);
+  const orgsLoading = orgsStatus === 'loading';
+
+  const profileName =
+    userProfile?.display_name ||
+    [userProfile?.first_name, userProfile?.last_name].filter(Boolean).join(' ') ||
+    (authUser?.profile?.display_name as string | undefined) ||
+    currentUser?.name ||
+    'Amaan Sharma';
+  const profileEmail = authUser?.email || currentUser?.email;
+  const profileRole = authUser?.memberships[0]?.role_name || currentUser?.role || 'Owner';
+  const profileAvatar = profileName
+    .split(' ')
+    .filter(Boolean)
+    .map((part) => part[0])
+    .join('')
+    .slice(0, 2)
+    .toUpperCase();
 
   const [orgDropdownOpen, setOrgDropdownOpen] = useState(false);
   const [profileDropdownOpen, setProfileDropdownOpen] = useState(false);
@@ -140,6 +164,20 @@ export const TopNav: React.FC<TopNavProps> = ({
               </div>
 
               <div className="max-h-60 overflow-y-auto py-1">
+                {orgsLoading && organizations.length === 0 && (
+                  <div className="px-3 py-2 text-neutral-500 font-mono flex items-center gap-2">
+                    <div className="w-3 h-3 border-2 border-neutral-400 border-t-transparent rounded-full animate-spin" />
+                    <span>Loading organizations...</span>
+                  </div>
+                )}
+                {orgsStatus === 'failed' && orgsError && organizations.length === 0 && (
+                  <div className="px-3 py-2 text-red-700">
+                    <div className="font-medium">{orgsError.message}</div>
+                    <div className="text-[10px] text-neutral-500 font-mono mt-0.5">
+                      Unable to load your organizations.
+                    </div>
+                  </div>
+                )}
                 {organizations.map((org) => {
                   const isSelected = org.id === currentOrg?.id;
                   return (
@@ -239,18 +277,18 @@ export const TopNav: React.FC<TopNavProps> = ({
             className="flex items-center cursor-pointer focus:outline-none"
           >
             <div className="w-8 h-8 bg-neutral-900 flex items-center justify-center text-white text-xs font-bold font-mono hover:bg-neutral-800 transition-colors">
-              {currentUser?.avatar || 'AM'}
+              {profileAvatar || 'AM'}
             </div>
           </button>
 
           {profileDropdownOpen && (
             <div className="absolute right-0 mt-1.5 w-60 max-w-[calc(100vw-1.5rem)] bg-white border border-neutral-200 shadow-xl py-1.5 z-50 text-xs animate-in fade-in zoom-in-95 duration-100">
               <div className="px-3 py-2 border-b border-neutral-100">
-                <div className="font-semibold text-neutral-900">{currentUser?.name || 'Amaan Sharma'}</div>
-                <div className="text-neutral-500 text-[11px] font-mono truncate">{currentUser?.email}</div>
+                <div className="font-semibold text-neutral-900">{profileName}</div>
+                <div className="text-neutral-500 text-[11px] font-mono truncate">{profileEmail}</div>
                 <div className="mt-1 inline-flex items-center gap-1 text-[10px] font-mono bg-neutral-100 text-neutral-700 px-1.5 py-0.5">
                   <Shield size={10} />
-                  <span>{currentUser?.role || 'Owner'} Role</span>
+                  <span>{profileRole} Role</span>
                 </div>
               </div>
 
@@ -281,8 +319,9 @@ export const TopNav: React.FC<TopNavProps> = ({
                 <button
                   onClick={() => {
                     setProfileDropdownOpen(false);
-                    logout();
-                    navigate('/login');
+                    void dispatch(logout())
+                      .unwrap()
+                      .then(() => navigate('/login'));
                   }}
                   id="logout-nav-btn"
                   className="w-full text-left px-3 py-1.5 text-red-600 hover:bg-red-50 flex items-center gap-2 font-medium"

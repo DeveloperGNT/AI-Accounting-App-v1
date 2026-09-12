@@ -205,8 +205,13 @@ export const CreateOrganizationPage: React.FC<CreateOrganizationPageProps> = ({ 
         chartOfAccountsTemplate,
       });
       navigate('/dashboard');
-    } catch {
-      setError('An error occurred while provisioning the business tenant.');
+    } catch (err: any) {
+      const apiMessage = err?.message || err?.providerMessage;
+      if (apiMessage) {
+        setError(apiMessage);
+      } else {
+        setError('An error occurred while provisioning the business tenant.');
+      }
       setLoading(false);
     }
   };

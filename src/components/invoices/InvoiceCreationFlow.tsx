@@ -13,13 +13,17 @@ import { TemplateSelector } from './TemplateSelector';
 import { InvoiceEditor } from './InvoiceEditor';
 import { InvoiceLivePreview } from './InvoiceLivePreview';
 import { useAccounting } from '../../context/AccountingContext';
-import { Invoice, InvoiceItem } from '../../types';
+import { useAppDispatch, useAppSelector } from '../../app/hooks';
+import {
+  createInvoice,
+} from '../../features/invoices/invoicesSlice';
+import { toCreateInvoiceRequestFromForm } from '../../features/invoices/invoiceMappers';
+import { getApiErrorMessage } from '../../utils/apiErrorMessage';
 import { formatINR } from '../../utils/formatters';
 import {
   ArrowLeft,
   CheckCircle2,
   Printer,
-  Sparkles,
   Layers,
   Save,
   RotateCcw,
@@ -29,6 +33,8 @@ import {
   Edit3,
   Check,
   Building2,
+  Loader2,
+  AlertCircle,
 } from 'lucide-react';
 
 interface InvoiceCreationFlowProps {
@@ -42,7 +48,9 @@ export const InvoiceCreationFlow: React.FC<InvoiceCreationFlowProps> = ({
   onBackToSales,
   onInvoiceCreated,
 }) => {
-  const { addInvoice, currentOrg, customers } = useAccounting();
+  const { currentOrg, customers } = useAccounting();
+  const dispatch = useAppDispatch();
+  const apiCustomers = useAppSelector((state) => state.customers.items);
 
   // Navigation step in the creation flow: 'choose-design' -> 'editor'
   const [currentStep, setCurrentStep] = useState<'choose-design' | 'editor'>('choose-design');
@@ -108,7 +116,12 @@ export const InvoiceCreationFlow: React.FC<InvoiceCreationFlowProps> = ({
   // Desktop view mode (split vs full editor vs full preview)
   const [viewMode, setViewMode] = useState<ViewMode>('split');
 
-  // Success modal state
+  // Save state
+  const [isSaving, setIsSaving] = useState<boolean>(false);
+  const [saveError, setSaveError] = useState<string>('');
+
+  // Success modal state — the invoice returned by the backend (a DRAFT with a
+  // server-assigned id; the real invoice number is generated at finalize)
   const [generatedInvoice, setGeneratedInvoice] = useState<{
     id: string;
     invoiceNumber: string;
@@ -150,71 +163,48 @@ export const InvoiceCreationFlow: React.FC<InvoiceCreationFlowProps> = ({
     setShowTemplateModal(false);
   };
 
-  // Handle save & generate invoice
-  const handleGenerateInvoice = () => {
-    if (!formData.customer.name.trim()) {
-      alert('Please enter or select a customer name.');
+  // Handle save & generate invoice — dispatches POST /invoices through the
+  // invoicesSlice thunk. The backend recomputes all totals, stores the draft
+  // with status DRAFT, and assigns the real invoice number at finalize.
+  const handleGenerateInvoice = async () => {
+    if (isSaving) return;
+
+    // The backend contract requires a real customer UUID: CreateInvoiceDto
+    // @IsUUID() customerId + at least one item with a non-empty description.
+    const customerId = formData.customer.id && apiCustomers.some((c) => c.id === formData.customer.id)
+      ? formData.customer.id
+      : '';
+    if (!customerId) {
+      setSaveError(
+        'Select a registered customer before saving — the ledger requires a customer account. Pick one in the Customer section of the form.',
+      );
       return;
     }
-    if (formData.items.length === 0) {
-      alert('Please add at least one line item.');
+    if (!formData.items.some((item) => item.description.trim())) {
+      setSaveError('Add at least one line item with a description.');
       return;
     }
 
-    const newId = `inv_${Date.now()}`;
-    const invoiceItems: InvoiceItem[] = formData.items.map((item, idx) => ({
-      id: item.id || `item_${idx + 1}`,
-      description: item.description || 'General Item / Service',
-      hsnSac: item.hsn || '9987',
-      quantity: Number(item.quantity) || 1,
-      unit: item.unit || 'NOS',
-      unitPrice: Number(item.rate) || 0,
-      taxRate: Number(item.gstRate) || 18,
-      taxAmount: formData.metadata.isInterstate
-        ? Number(item.igst) || 0
-        : (Number(item.cgst) || 0) + (Number(item.sgst) || 0),
-      total: Number(item.total) || 0,
-    }));
+    setIsSaving(true);
+    setSaveError('');
+    try {
+      const created = await dispatch(
+        createInvoice(toCreateInvoiceRequestFromForm(formData, customerId)),
+      ).unwrap();
 
-    const newInvoice: Invoice = {
-      id: newId,
-      orgId: currentOrg?.id || 'org_acme',
-      invoiceNumber: formData.metadata.invoiceNumber || `INV/2026/${Math.floor(1000 + Math.random() * 9000)}`,
-      customerId: formData.customer.id || 'cust_custom',
-      customerName: formData.customer.name,
-      customerGstin: formData.customer.gstin,
-      date: formData.metadata.invoiceDate,
-      dueDate: formData.metadata.dueDate,
-      items: invoiceItems,
-      subtotal: calculations.subtotal,
-      discount: calculations.itemDiscounts + calculations.additionalDiscount,
-      taxableAmount: calculations.taxableAmount,
-      cgst: calculations.totalCgst,
-      sgst: calculations.totalSgst,
-      igst: calculations.totalIgst,
-      totalAmount: calculations.grandTotal,
-      amountPaid: 0,
-      status: 'Sent',
-      paymentTerms: formData.metadata.paymentTerms,
-      notes: formData.notes,
-      termsAndConditions: formData.termsAndConditions,
-      placeOfSupply: formData.customer.placeOfSupply || formData.customer.state,
-      isInterState: formData.metadata.isInterstate,
-      reverseCharge: formData.metadata.reverseCharge,
-      templateId: formData.templateId,
-    };
-
-    // Save to accounting context
-    addInvoice(newInvoice);
-
-    // Show success dialog
-    setGeneratedInvoice({
-      id: newId,
-      invoiceNumber: newInvoice.invoiceNumber,
-      customerName: newInvoice.customerName,
-      grandTotal: newInvoice.totalAmount,
-      templateId: formData.templateId,
-    });
+      // Show success dialog with the server-assigned identity
+      setGeneratedInvoice({
+        id: created.id,
+        invoiceNumber: created.invoiceNumber,
+        customerName: created.customerNameSnapshot || formData.customer.name,
+        grandTotal: Number(created.grandTotal),
+        templateId: formData.templateId,
+      });
+    } catch (err) {
+      setSaveError(getApiErrorMessage(err, 'Failed to create the invoice draft.'));
+    } finally {
+      setIsSaving(false);
+    }
   };
 
   const handleReset = () => {
@@ -338,7 +328,7 @@ export const InvoiceCreationFlow: React.FC<InvoiceCreationFlowProps> = ({
             <div className="text-[11px] text-neutral-500 font-mono flex items-center gap-2">
               <span>Template: <strong className="text-neutral-900">{selectedTemplateMeta.number} ({selectedTemplateMeta.name})</strong></span>
               <span>•</span>
-              <span>{formData.metadata.invoiceNumber}</span>
+              <span>Invoice No. is generated when the draft is finalized</span>
             </div>
           </div>
         </div>
@@ -406,14 +396,37 @@ export const InvoiceCreationFlow: React.FC<InvoiceCreationFlowProps> = ({
           <button
             type="button"
             onClick={handleGenerateInvoice}
+            disabled={isSaving}
             id="generate-invoice-btn"
-            className="px-4 py-1.5 bg-neutral-950 hover:bg-neutral-900 text-white rounded-xs font-mono text-xs font-semibold flex items-center gap-1.5 transition-all shadow-xs active:scale-95"
+            className="px-4 py-1.5 bg-neutral-950 hover:bg-neutral-900 disabled:opacity-50 text-white rounded-xs font-mono text-xs font-semibold flex items-center gap-1.5 transition-all shadow-xs active:scale-95"
           >
-            <FileCheck size={14} />
-            <span>Generate Invoice ({formatINR(calculations.grandTotal, false)})</span>
+            {isSaving ? (
+              <>
+                <Loader2 size={14} className="animate-spin" />
+                <span>Saving Draft...</span>
+              </>
+            ) : (
+              <>
+                <FileCheck size={14} />
+                <span>Save Draft ({formatINR(calculations.grandTotal, false)})</span>
+              </>
+            )}
           </button>
         </div>
       </header>
+
+      {/* Save error banner */}
+      {saveError && (
+        <div className="bg-red-50 border-b border-red-200 text-red-800 px-4 sm:px-6 py-2.5 text-xs flex items-center justify-between gap-3">
+          <span className="flex items-center gap-2">
+            <AlertCircle size={13} />
+            {saveError}
+          </span>
+          <button onClick={() => setSaveError('')} className="p-1 hover:text-red-950" title="Dismiss">
+            <X size={14} />
+          </button>
+        </div>
+      )}
 
       {/* Mobile / Tablet Tab Switcher (Visible on < lg screens) */}
       <div className="lg:hidden bg-white border-b border-neutral-200 px-4 py-2 flex items-center justify-between sticky top-[57px] z-10 shadow-2xs">
@@ -524,7 +537,7 @@ export const InvoiceCreationFlow: React.FC<InvoiceCreationFlowProps> = ({
 
             <div>
               <h3 className="text-lg font-bold text-neutral-950">
-                Tax Invoice Created & Saved!
+                Invoice Draft Saved to Ledger!
               </h3>
               <p className="text-xs text-neutral-500 mt-1 font-mono">
                 {generatedInvoice.invoiceNumber} • {generatedInvoice.customerName}
@@ -542,8 +555,12 @@ export const InvoiceCreationFlow: React.FC<InvoiceCreationFlowProps> = ({
               </div>
               <div className="flex justify-between">
                 <span className="text-neutral-500 font-sans">Status:</span>
-                <span className="text-emerald-700 font-bold">SENT (Unpaid)</span>
+                <span className="text-amber-700 font-bold">DRAFT (unissued)</span>
               </div>
+              <p className="text-[11px] text-neutral-500 pt-1 border-t border-neutral-200">
+                Open the invoice in Sales and press <strong>Finalize &amp; Issue</strong> — that
+                generates the official invoice number and posts the double-entry journal.
+              </p>
             </div>
 
             <div className="flex items-center justify-center gap-2 pt-2">

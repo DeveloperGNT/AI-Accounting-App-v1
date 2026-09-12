@@ -1,10 +1,16 @@
 import {StrictMode} from 'react';
 import {createRoot} from 'react-dom/client';
+import {Provider} from 'react-redux';
 import App from './App.tsx';
+import {AuthSessionBootstrap} from './app/AuthSessionBootstrap';
+import {store} from './app/store';
 import './index.css';
 
 createRoot(document.getElementById('root')!).render(
   <StrictMode>
-    <App />
+    <Provider store={store}>
+      <AuthSessionBootstrap />
+      <App />
+    </Provider>
   </StrictMode>,
 );

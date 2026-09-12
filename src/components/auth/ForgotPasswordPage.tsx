@@ -1,23 +1,36 @@
 import React, { useState } from 'react';
 import { ArrowLeft, CheckCircle2, Mail, ArrowRight } from 'lucide-react';
+import { useAppDispatch, useAppSelector } from '../../app/hooks';
+import { resetPassword } from '../../features/auth/authSlice';
 
 interface ForgotPasswordPageProps {
   navigate: (route: string) => void;
 }
 
 export const ForgotPasswordPage: React.FC<ForgotPasswordPageProps> = ({ navigate }) => {
+  const dispatch = useAppDispatch();
+  const authStatus = useAppSelector((state) => state.auth.status);
+  const authError = useAppSelector((state) => state.auth.error);
   const [email, setEmail] = useState('');
   const [submitted, setSubmitted] = useState(false);
-  const [loading, setLoading] = useState(false);
+  const [error, setError] = useState('');
+  const loading = authStatus === 'loading';
 
-  const handleSubmit = (e: React.FormEvent) => {
+  const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
     if (!email) return;
-    setLoading(true);
-    setTimeout(() => {
-      setLoading(false);
+    setError('');
+
+    try {
+      await dispatch(resetPassword(email)).unwrap();
       setSubmitted(true);
-    }, 400);
+    } catch (errorResponse) {
+      setError(
+        typeof errorResponse === 'object' && errorResponse && 'message' in errorResponse
+          ? String((errorResponse as { message: unknown }).message)
+          : authError?.message || 'Unable to send password reset instructions.',
+      );
+    }
   };
 
   return (
@@ -50,6 +63,24 @@ export const ForgotPasswordPage: React.FC<ForgotPasswordPageProps> = ({ navigate
             </div>
 
             <form onSubmit={handleSubmit} className="space-y-4">
+              {error && (
+                <div className="p-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded-xs">
+                  <div>{error}</div>
+                  {authError?.providerCode && (
+                    <div className="mt-1 font-mono text-[10px]">Code: {authError.providerCode}</div>
+                  )}
+                  {authError?.providerStatus && (
+                    <div className="font-mono text-[10px]">Status: {authError.providerStatus}</div>
+                  )}
+                  {authError?.providerMessage && authError.providerMessage !== error && (
+                    <div className="mt-1 text-[10px]">Supabase: {authError.providerMessage}</div>
+                  )}
+                  {authError?.providerErrorId && (
+                    <div className="font-mono text-[10px]">Error ID: {authError.providerErrorId}</div>
+                  )}
+                </div>
+              )}
+
               <div>
                 <label className="block text-xs font-medium text-slate-700 mb-1">
                   Email Address

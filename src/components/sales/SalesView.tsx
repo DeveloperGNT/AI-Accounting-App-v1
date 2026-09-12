@@ -1,23 +1,40 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useMemo } from 'react';
 import {
   Plus,
   Search,
-  Filter,
-  Receipt,
-  FileText,
   Printer,
   Trash2,
   X,
   CheckCircle2,
   AlertCircle,
   Eye,
-  Send,
-  Building,
-  User
+  Ban,
+  ShieldCheck,
+  FileText,
+  Wallet,
+  Loader2
 } from 'lucide-react';
+import { useAppDispatch, useAppSelector } from '../../app/hooks';
+import {
+  fetchInvoices,
+  fetchInvoiceById,
+  finalizeInvoice,
+  cancelInvoice,
+  deleteInvoice,
+  updateInvoice,
+} from '../../features/invoices/invoicesSlice';
+import { toUiInvoice } from '../../features/invoices/invoiceMappers';
+import type { ApiInvoiceStatus, Invoice as ApiInvoice } from '../../api/invoicesTypes';
+import {
+  createPayment,
+  postPayment,
+  voidPayment,
+} from '../../features/payments/paymentsSlice';
+import { PaymentMethod, PaymentStatus } from '../../api/paymentsTypes';
+import { getApiErrorMessage } from '../../utils/apiErrorMessage';
 import { useAccounting } from '../../context/AccountingContext';
 import { formatINR, formatDate, numberToWordsIndian } from '../../utils/formatters';
-import { Invoice, InvoiceItem, InvoiceStatus } from '../../types';
+import { Invoice } from '../../types';
 import { InvoiceRenderer } from '../invoices/templates/InvoiceRenderer';
 import { InvoiceTemplateId, InvoiceFormData } from '../invoices/types';
 import { INVOICE_TEMPLATES, recalculateInvoice } from '../invoices/mockInvoiceData';
@@ -26,155 +43,175 @@ interface SalesViewProps {
   navigate: (route: string) => void;
 }
 
+// Backend lifecycle statuses mapped onto the UI filter tabs. The backend has
+// no OVERDUE status, so the Overdue tab is derived from the due date.
+const STATUS_TAB_TO_API: Record<string, ApiInvoiceStatus[]> = {
+  All: [],
+  Sent: ['FINALIZED'],
+  Paid: ['PAID'],
+  'Partially Paid': ['PARTIALLY_PAID'],
+  Overdue: [],
+  Draft: ['DRAFT', 'CANCELLED'],
+};
+
+const isOverdue = (inv: Invoice) =>
+  Boolean(inv.dueDate) &&
+  inv.dueDate < new Date().toISOString().slice(0, 10) &&
+  (inv.apiStatus === 'FINALIZED' || inv.apiStatus === 'PARTIALLY_PAID');
+
 export const SalesView: React.FC<SalesViewProps> = ({ navigate }) => {
-  const { invoices, customers, addInvoice, updateInvoiceStatus, currentOrg } = useAccounting();
+  const dispatch = useAppDispatch();
+  const { customers, currentOrg } = useAccounting();
+  const invoicesState = useAppSelector((state) => state.invoices);
+  const paymentsState = useAppSelector((state) => state.payments);
 
   const [statusFilter, setStatusFilter] = useState<string>('All');
   const [searchQuery, setSearchQuery] = useState('');
-  const [selectedInvoice, setSelectedInvoice] = useState<Invoice | null>(null);
+  const [selectedInvoiceId, setSelectedInvoiceId] = useState<string | null>(null);
   const [drawerTemplateId, setDrawerTemplateId] = useState<InvoiceTemplateId>('classic');
-  const [isCreateModalOpen, setIsCreateModalOpen] = useState(false);
-  const [isSubmittingInvoice, setIsSubmittingInvoice] = useState(false);
+  const [actionError, setActionError] = useState('');
+  const [busyAction, setBusyAction] = useState<string | null>(null);
+  const [paySuccess, setPaySuccess] = useState('');
 
-  // New Invoice Form State
-  const [invoiceNumber, setInvoiceNumber] = useState(`INV-2026-${1029 + invoices.length}`);
-  const [selectedCustomerId, setSelectedCustomerId] = useState(customers[0]?.id || '');
-  const [invoiceDate, setInvoiceDate] = useState('2026-08-08');
-  const [dueDate, setDueDate] = useState('2026-09-07');
-  const [isInterstate, setIsInterstate] = useState(false);
-  const [notes, setNotes] = useState('Payment terms: Net 30 days. Please remit via RTGS/NEFT to HDFC Bank A/c #0060.');
+  // Record-payment modal state (POST /api/v1/api/v1/payments + optional post)
+  const [showPaymentModal, setShowPaymentModal] = useState(false);
+  const [payAmount, setPayAmount] = useState('');
+  const [payDate, setPayDate] = useState(new Date().toISOString().slice(0, 10));
+  const [payMethod, setPayMethod] = useState<PaymentMethod>(PaymentMethod.BANK_TRANSFER);
+  const [payRef, setPayRef] = useState('');
 
-  const selectedCustomerObj = customers.find((c) => c.id === selectedCustomerId) || customers[0];
+  // Invoices live in the backend via the invoices Redux slice (GET /invoices).
+  // Map them onto the legacy UI shape for the table/printer consumers.
+  const invoices = useMemo<Invoice[]>(
+    () => invoicesState.items.map(toUiInvoice),
+    [invoicesState.items],
+  );
 
-  const [items, setItems] = useState<InvoiceItem[]>([
-    {
-      id: 'item_1',
-      description: 'Industrial Precision Spindle Assembly',
-      hsn: '8466',
-      quantity: 1,
-      unit: 'NOS',
-      rate: 45000,
-      discountPct: 0,
-      gstRate: 18,
-      amount: 45000,
-      cgst: 4050,
-      sgst: 4050,
-      igst: 0,
-    },
-  ]);
+  // Load the invoice list when the view mounts.
+  useEffect(() => {
+    dispatch(fetchInvoices());
+  }, [dispatch]);
 
-  // Recalculate line items
-  const updateItem = (index: number, field: keyof InvoiceItem, value: any) => {
-    const updated = [...items];
-    const item = { ...updated[index], [field]: value };
-
-    const qty = Number(item.quantity) || 0;
-    const rate = Number(item.rate) || 0;
-    const discount = Number(item.discountPct) || 0;
-    const gstRate = Number(item.gstRate) || 0;
-
-    const base = qty * rate;
-    const discounted = base - (base * discount) / 100;
-    item.amount = discounted;
-
-    if (isInterstate) {
-      item.cgst = 0;
-      item.sgst = 0;
-      item.igst = Math.round((discounted * gstRate) / 100);
-    } else {
-      const tax = (discounted * gstRate) / 100;
-      item.cgst = Math.round(tax / 2);
-      item.sgst = Math.round(tax / 2);
-      item.igst = 0;
+  // "View invoice" → GET /invoices/:id (the only endpoint that returns line
+  // items; the list endpoint omits them). The fulfilled case upserts into the
+  // list, which re-renders the drawer with fresh items/status.
+  useEffect(() => {
+    if (selectedInvoiceId) {
+      dispatch(fetchInvoiceById(selectedInvoiceId));
     }
+  }, [selectedInvoiceId, dispatch]);
 
-    updated[index] = item;
-    setItems(updated);
-  };
+  const selectedInvoice: Invoice | null = selectedInvoiceId
+    ? invoices.find((i) => i.id === selectedInvoiceId) ?? null
+    : null;
 
-  const addItem = () => {
-    setItems([
-      ...items,
-      {
-        id: `item_${Date.now()}`,
-        description: '',
-        hsn: '9987',
-        quantity: 1,
-        unit: 'NOS',
-        rate: 0,
-        discountPct: 0,
-        gstRate: 18,
-        amount: 0,
-        cgst: 0,
-        sgst: 0,
-        igst: 0,
-      },
-    ]);
-  };
-
-  const removeItem = (index: number) => {
-    if (items.length > 1) {
-      setItems(items.filter((_, i) => i !== index));
+  const runInvoiceAction = async (label: string, action: () => Promise<unknown>, onDone?: () => void) => {
+    setBusyAction(label);
+    setActionError('');
+    try {
+      await action();
+      onDone?.();
+    } catch (err) {
+      setActionError(getApiErrorMessage(err, `Failed to ${label.toLowerCase()} the invoice.`));
+    } finally {
+      setBusyAction(null);
     }
   };
 
-  // Calculations for total invoice
-  const subtotal = items.reduce((sum, item) => sum + (Number(item.quantity) * Number(item.rate)), 0);
-  const taxableAmount = items.reduce((sum, item) => sum + item.amount, 0);
-  const totalDiscount = subtotal - taxableAmount;
-  const totalCgst = items.reduce((sum, item) => sum + item.cgst, 0);
-  const totalSgst = items.reduce((sum, item) => sum + item.sgst, 0);
-  const totalIgst = items.reduce((sum, item) => sum + item.igst, 0);
-  const totalInvoiceAmount = taxableAmount + totalCgst + totalSgst + totalIgst;
+  const handleFinalize = (inv: Invoice) =>
+    runInvoiceAction('Finalize', () => dispatch(finalizeInvoice(inv.id)).unwrap());
 
-  const handleCreateInvoice = (e: React.FormEvent) => {
-    e.preventDefault();
-    if (isSubmittingInvoice) return;
-    setIsSubmittingInvoice(true);
-
-    setTimeout(() => {
-      const cust = customers.find((c) => c.id === selectedCustomerId) || customers[0];
-
-      addInvoice({
-        invoiceNumber,
-        customerId: cust.id,
-        customerName: cust.name,
-        customerGstin: cust.gstin,
-        date: invoiceDate,
-        dueDate,
-        items,
-        subtotal,
-        discount: totalDiscount,
-        taxableAmount,
-        cgst: totalCgst,
-        sgst: totalSgst,
-        igst: totalIgst,
-        totalAmount: totalInvoiceAmount,
-        amountPaid: 0,
-        status: 'Sent',
-        notes,
-      });
-
-      setIsSubmittingInvoice(false);
-      setIsCreateModalOpen(false);
-      setInvoiceNumber(`INV-2026-${1030 + invoices.length}`);
-    }, 450);
+  const handleCancel = (inv: Invoice) => {
+    if (!window.confirm(`Cancel invoice ${inv.invoiceNumber}? The posted journal entry will be reversed.`)) return;
+    void runInvoiceAction('Cancel', () => dispatch(cancelInvoice(inv.id)).unwrap());
   };
 
-  // Metrics
-  const totalSales = invoices.reduce((sum, inv) => sum + inv.totalAmount, 0);
+  const handleDeleteDraft = (inv: Invoice) => {
+    if (!window.confirm(`Delete draft ${inv.invoiceNumber}? This cannot be undone.`)) return;
+    void runInvoiceAction('Delete', async () => {
+      await dispatch(deleteInvoice(inv.id)).unwrap();
+      setSelectedInvoiceId(null);
+    });
+  };
+
+  // PAYMENTS — create (POST /payments) and immediately post (POST /payments/{id}/post)
+  // so the receivable settles and the invoice status updates server-side.
+  const openPaymentModal = (inv: Invoice) => {
+    setPayAmount(String(inv.totalAmount));
+    setPayDate(new Date().toISOString().slice(0, 10));
+    setPayMethod(PaymentMethod.BANK_TRANSFER);
+    setPayRef('');
+    setPaySuccess('');
+    setShowPaymentModal(true);
+  };
+
+  const submitPayment = async (inv: Invoice, alsoPost: boolean) => {
+    const amount = Number(payAmount);
+    if (!amount || amount <= 0) {
+      setActionError('Enter a payment amount greater than zero.');
+      return;
+    }
+    setBusyAction('Pay');
+    setActionError('');
+    try {
+      const created = await dispatch(
+        createPayment({
+          customerId: inv.customerId,
+          paymentDate: payDate,
+          paymentMethod: payMethod,
+          amount,
+          referenceNumber: payRef.trim() ? payRef.trim() : undefined,
+          allocations: [{ invoiceId: inv.id, amount }],
+        }),
+      ).unwrap();
+
+      if (alsoPost) {
+        await dispatch(postPayment(created.id)).unwrap();
+        // Payment posted → invoice status changed server-side (PAID /
+        // PARTIALLY_PAID); refresh it so the list reflects the ledger.
+        dispatch(fetchInvoiceById(inv.id));
+        setPaySuccess(`Payment ${created.paymentNumber} posted.`);
+      } else {
+        setPaySuccess(`Payment ${created.paymentNumber} saved as draft.`);
+      }
+      setShowPaymentModal(false);
+    } catch (err) {
+      setActionError(getApiErrorMessage(err, 'Failed to record the payment.'));
+    } finally {
+      setBusyAction(null);
+    }
+  };
+
+  // VOID — only POSTED payments can be voided (backend rule). The invoice's
+  // status is recalculated server-side (back to FINALIZED/PARTIALLY_PAID), so
+  // refresh it from the ledger afterwards.
+  const handleVoidPayment = (inv: Invoice, paymentId: string, paymentNumber: string) => {
+    if (!window.confirm(`Void payment ${paymentNumber}? Its journal entry will be reversed.`)) return;
+    void runInvoiceAction('Void', async () => {
+      await dispatch(voidPayment(paymentId)).unwrap();
+      dispatch(fetchInvoiceById(inv.id));
+      setPaySuccess(`Payment ${paymentNumber} voided. Invoice status refreshed.`);
+    });
+  };
+
+  // Metrics — computed from backend lifecycle statuses.
+  const billable = invoices.filter((i) => i.apiStatus !== 'CANCELLED');
+  const totalSales = billable.reduce((sum, inv) => sum + inv.totalAmount, 0);
   const paidSales = invoices
-    .filter((i) => i.status === 'Paid')
+    .filter((i) => i.apiStatus === 'PAID')
     .reduce((sum, inv) => sum + inv.totalAmount, 0);
   const outstandingSales = invoices
-    .filter((i) => i.status === 'Sent' || i.status === 'Partially Paid' || i.status === 'Overdue')
-    .reduce((sum, inv) => sum + (inv.totalAmount - inv.amountPaid), 0);
-  const overdueSales = invoices
-    .filter((i) => i.status === 'Overdue')
-    .reduce((sum, inv) => sum + (inv.totalAmount - inv.amountPaid), 0);
+    .filter((i) => i.apiStatus === 'FINALIZED' || i.apiStatus === 'PARTIALLY_PAID')
+    .reduce((sum, inv) => sum + inv.totalAmount, 0);
+  const overdueSales = invoices.filter(isOverdue).reduce((sum, inv) => sum + inv.totalAmount, 0);
 
   const filteredInvoices = invoices.filter((inv) => {
-    if (statusFilter !== 'All' && inv.status !== statusFilter) return false;
+    const allowed = STATUS_TAB_TO_API[statusFilter] ?? [];
+    if (statusFilter === 'Overdue') {
+      if (!isOverdue(inv)) return false;
+    } else if (allowed.length > 0 && (!inv.apiStatus || !allowed.includes(inv.apiStatus))) {
+      return false;
+    }
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
       return (
@@ -209,6 +246,28 @@ export const SalesView: React.FC<SalesViewProps> = ({ navigate }) => {
         </button>
       </div>
 
+      {/* Sync error / loading banners */}
+      {invoicesState.status === 'failed' && (
+        <div className="bg-red-50 border border-red-200 text-red-800 rounded-xs px-4 py-3 flex items-center justify-between gap-3 text-xs">
+          <span className="flex items-center gap-2">
+            <AlertCircle size={14} />
+            Invoice sync error: {getApiErrorMessage(invoicesState.error, 'Could not load invoices.')}
+          </span>
+          <button
+            onClick={() => dispatch(fetchInvoices())}
+            className="font-semibold underline hover:no-underline whitespace-nowrap"
+          >
+            Retry
+          </button>
+        </div>
+      )}
+      {invoicesState.status === 'loading' && invoices.length === 0 && (
+        <div className="bg-slate-50 border border-slate-200 text-slate-600 rounded-xs px-4 py-3 text-xs font-mono flex items-center gap-2">
+          <Loader2 size={14} className="animate-spin" />
+          Loading invoices from ledger...
+        </div>
+      )}
+
       {/* Sales Metric Cards */}
       <div className="grid grid-cols-2 lg:grid-cols-4 gap-4">
         <div className="bg-white border border-slate-200 p-4 rounded-xs">
@@ -219,7 +278,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ navigate }) => {
             {formatINR(totalSales, false)}
           </div>
           <div className="mt-1 text-[10px] font-mono text-slate-500">
-            {invoices.length} invoices generated
+            {billable.length} invoices generated
           </div>
         </div>
 
@@ -231,7 +290,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ navigate }) => {
             {formatINR(outstandingSales, false)}
           </div>
           <div className="mt-1 text-[10px] font-mono text-amber-700 font-medium">
-            Active credit receivables
+            Finalized & awaiting settlement
           </div>
         </div>
 
@@ -243,7 +302,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ navigate }) => {
             {formatINR(paidSales, false)}
           </div>
           <div className="mt-1 text-[10px] font-mono text-emerald-700">
-            Bank reconciliations matched
+            Payments recorded against invoices
           </div>
         </div>
 
@@ -255,7 +314,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ navigate }) => {
             {formatINR(overdueSales, false)}
           </div>
           <div className="mt-1 text-[10px] font-mono text-red-700 font-bold">
-            Requires immediate collection
+            Past due date, unpaid
           </div>
         </div>
       </div>
@@ -263,7 +322,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ navigate }) => {
       {/* Filter Tabs & Search */}
       <div className="bg-white border border-slate-200 rounded-xs p-4 space-y-4">
         <div className="flex items-center gap-1 border-b border-slate-200 pb-3 overflow-x-auto">
-          {['All', 'Sent', 'Paid', 'Partially Paid', 'Overdue', 'Draft'].map((tab) => (
+          {Object.keys(STATUS_TAB_TO_API).map((tab) => (
             <button
               key={tab}
               onClick={() => setStatusFilter(tab)}
@@ -323,7 +382,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ navigate }) => {
                 filteredInvoices.map((inv) => (
                   <tr
                     key={inv.id}
-                    onClick={() => setSelectedInvoice(inv)}
+                    onClick={() => setSelectedInvoiceId(inv.id)}
                     className="cursor-pointer hover:bg-slate-50 transition-colors"
                   >
                     <td className="font-mono font-bold text-slate-900 whitespace-nowrap">
@@ -332,7 +391,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ navigate }) => {
                     <td className="text-xs">
                       <div className="font-semibold text-slate-900">{inv.customerName}</div>
                       <div className="text-[10px] text-slate-400 font-mono">
-                        GSTIN: {inv.customerGstin}
+                        GSTIN: {inv.customerGstin || 'UNREGISTERED'}
                       </div>
                     </td>
                     <td className="font-mono text-slate-600 whitespace-nowrap text-xs">
@@ -355,19 +414,19 @@ export const SalesView: React.FC<SalesViewProps> = ({ navigate }) => {
                         className={`px-2 py-0.5 text-[10px] font-mono rounded-xs font-semibold ${
                           inv.status === 'Paid'
                             ? 'bg-emerald-100 text-emerald-900'
-                            : inv.status === 'Overdue'
-                            ? 'bg-red-100 text-red-900'
+                            : inv.status === 'Partially Paid'
+                            ? 'bg-amber-100 text-amber-900'
                             : inv.status === 'Sent'
                             ? 'bg-blue-100 text-blue-900'
                             : 'bg-slate-100 text-slate-700'
                         }`}
                       >
-                        {inv.status}
+                        {inv.status === 'Sent' && isOverdue(inv) ? 'Overdue' : inv.status}
                       </span>
                     </td>
                     <td className="text-right whitespace-nowrap" onClick={(e) => e.stopPropagation()}>
                       <button
-                        onClick={() => setSelectedInvoice(inv)}
+                        onClick={() => setSelectedInvoiceId(inv.id)}
                         className="p-1.5 text-slate-400 hover:text-slate-900 hover:bg-slate-100 rounded-xs"
                         title="View / Print Tax Invoice"
                       >
@@ -382,343 +441,128 @@ export const SalesView: React.FC<SalesViewProps> = ({ navigate }) => {
         </div>
       </div>
 
-      {/* CREATE INVOICE MODAL */}
-      {isCreateModalOpen && (
+      {/* RECORD PAYMENT MODAL (create + post via dispatch) */}
+      {showPaymentModal && selectedInvoice && (
         <div className="fixed inset-0 z-50 bg-slate-950/60 backdrop-blur-xs flex items-center justify-center p-4">
-          <div className="bg-white border border-slate-300 rounded-xs shadow-2xl w-full max-w-4xl max-h-[90vh] overflow-y-auto">
-            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between sticky top-0 bg-white z-10">
+          <div className="bg-white border border-slate-300 rounded-xs shadow-2xl w-full max-w-md">
+            <div className="px-6 py-4 border-b border-slate-200 flex items-center justify-between">
               <div>
-                <h3 className="text-base font-bold text-slate-950 tracking-tight">
-                  Create Tax Invoice (GST Compliant)
-                </h3>
+                <h3 className="text-base font-bold text-slate-950 tracking-tight">Record Customer Payment</h3>
                 <p className="text-xs text-slate-500 font-mono">
-                  {currentOrg?.name} • GSTIN: {currentOrg?.gstin}
+                  {selectedInvoice.invoiceNumber} • {selectedInvoice.customerName}
                 </p>
               </div>
               <button
-                onClick={() => setIsCreateModalOpen(false)}
+                onClick={() => setShowPaymentModal(false)}
                 className="p-1 rounded-xs hover:bg-slate-100 text-slate-400 hover:text-slate-700"
               >
                 <X size={18} />
               </button>
             </div>
-
-            <form onSubmit={handleCreateInvoice} className="p-6 space-y-6 text-xs">
-              {/* Header Details */}
-              <div className="grid grid-cols-1 sm:grid-cols-4 gap-4">
+            <div className="p-6 space-y-4 text-xs">
+              <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <label className="block font-medium text-slate-700 mb-1">
-                    Invoice Serial No. *
-                  </label>
+                  <label className="block font-medium text-slate-700 mb-1">Amount (₹) *</label>
                   <input
-                    type="text"
+                    type="number"
+                    min="0.01"
                     required
-                    value={invoiceNumber}
-                    onChange={(e) => setInvoiceNumber(e.target.value)}
+                    value={payAmount}
+                    onChange={(e) => setPayAmount(e.target.value)}
                     className="w-full px-3 py-2 border border-slate-300 rounded-xs font-mono font-bold text-slate-900 focus:outline-none focus:border-slate-900"
                   />
+                  <div className="mt-1 text-[10px] font-mono text-slate-500">
+                    Invoice total: {formatINR(selectedInvoice.totalAmount)}
+                  </div>
                 </div>
-
                 <div>
-                  <label className="block font-medium text-slate-700 mb-1">
-                    Select Customer *
-                  </label>
+                  <label className="block font-medium text-slate-700 mb-1">Payment Date *</label>
+                  <input
+                    type="date"
+                    required
+                    value={payDate}
+                    onChange={(e) => setPayDate(e.target.value)}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-xs font-mono focus:outline-none focus:border-slate-900"
+                  />
+                </div>
+              </div>
+              <div className="grid grid-cols-2 gap-4">
+                <div>
+                  <label className="block font-medium text-slate-700 mb-1">Method *</label>
                   <select
-                    value={selectedCustomerId}
-                    onChange={(e) => {
-                      setSelectedCustomerId(e.target.value);
-                      const target = customers.find((c) => c.id === e.target.value);
-                      if (target && target.state.includes('Maharashtra')) {
-                        setIsInterstate(false);
-                      } else {
-                        setIsInterstate(true);
-                      }
-                    }}
-                    className="w-full px-3 py-2 border border-slate-300 rounded-xs focus:outline-none focus:border-slate-900 bg-white font-medium"
+                    value={payMethod}
+                    onChange={(e) => setPayMethod(e.target.value as PaymentMethod)}
+                    className="w-full px-3 py-2 border border-slate-300 rounded-xs bg-white font-medium focus:outline-none focus:border-slate-900"
                   >
-                    {customers.map((c) => (
-                      <option key={c.id} value={c.id}>
-                        {c.name} ({c.gstin})
-                      </option>
+                    {Object.values(PaymentMethod).map((m) => (
+                      <option key={m} value={m}>{m.replace('_', ' ')}</option>
                     ))}
                   </select>
-
-                  {selectedCustomerObj && (
-                    <div className="mt-1.5 p-2 bg-slate-50 border border-slate-200 rounded-xs text-[11px] font-mono text-slate-600 flex flex-wrap items-center justify-between gap-1">
-                      <span>State: <strong className="text-slate-900">{selectedCustomerObj.state}</strong></span>
-                      <span>GSTIN: <strong className="text-slate-900">{selectedCustomerObj.gstin}</strong></span>
-                      <span>Terms: <strong className="text-slate-900">{selectedCustomerObj.paymentTerms}</strong></span>
-                    </div>
-                  )}
                 </div>
-
                 <div>
-                  <label className="block font-medium text-slate-700 mb-1">
-                    Invoice Date *
-                  </label>
+                  <label className="block font-medium text-slate-700 mb-1">Reference No.</label>
                   <input
-                    type="date"
-                    required
-                    value={invoiceDate}
-                    onChange={(e) => setInvoiceDate(e.target.value)}
-                    className="w-full px-3 py-2 border border-slate-300 rounded-xs font-mono focus:outline-none focus:border-slate-900"
-                  />
-                </div>
-
-                <div>
-                  <label className="block font-medium text-slate-700 mb-1">
-                    Payment Due Date *
-                  </label>
-                  <input
-                    type="date"
-                    required
-                    value={dueDate}
-                    onChange={(e) => setDueDate(e.target.value)}
+                    type="text"
+                    placeholder="UTR / cheque no."
+                    value={payRef}
+                    onChange={(e) => setPayRef(e.target.value)}
                     className="w-full px-3 py-2 border border-slate-300 rounded-xs font-mono focus:outline-none focus:border-slate-900"
                   />
                 </div>
               </div>
-
-              {/* Interstate GST Toggle */}
-              <div className="flex items-center gap-2 p-3 bg-slate-50 border border-slate-200 rounded-xs">
-                <input
-                  type="checkbox"
-                  id="interstate-check"
-                  checked={isInterstate}
-                  onChange={(e) => {
-                    setIsInterstate(e.target.checked);
-                    // trigger recompute
-                    items.forEach((_, idx) => updateItem(idx, 'quantity', items[idx].quantity));
-                  }}
-                  className="rounded-xs text-slate-900 focus:ring-0"
-                />
-                <label htmlFor="interstate-check" className="font-mono text-slate-800 cursor-pointer">
-                  Interstate Supply (Charge Integrated GST - IGST instead of CGST + SGST)
-                </label>
-              </div>
-
-              {/* Line Items Table */}
-              <div className="border border-slate-200 rounded-xs overflow-hidden">
-                <div className="bg-slate-50 px-4 py-2.5 border-b border-slate-200 font-bold uppercase text-[11px] text-slate-700 font-mono">
-                  Goods / Service Line Items
-                </div>
-                <div className="overflow-x-auto">
-                <table className="w-full swiss-table min-w-[640px]">
-                  <thead>
-                    <tr>
-                      <th>Description</th>
-                      <th className="w-20">HSN/SAC</th>
-                      <th className="w-16">Qty</th>
-                      <th className="w-16">Unit</th>
-                      <th className="w-24 text-right">Rate (₹)</th>
-                      <th className="w-16 text-right">Disc%</th>
-                      <th className="w-20">GST %</th>
-                      <th className="w-28 text-right">Taxable (₹)</th>
-                      <th className="w-10"></th>
-                    </tr>
-                  </thead>
-                  <tbody>
-                    {items.map((item, index) => (
-                      <tr key={item.id}>
-                        <td>
-                          <input
-                            type="text"
-                            required
-                            placeholder="Item description / particulars"
-                            value={item.description}
-                            onChange={(e) => updateItem(index, 'description', e.target.value)}
-                            className="w-full px-2 py-1 border border-slate-200 rounded-xs focus:outline-none focus:border-slate-900"
-                          />
-                        </td>
-                        <td>
-                          <input
-                            type="text"
-                            placeholder="8466"
-                            value={item.hsn}
-                            onChange={(e) => updateItem(index, 'hsn', e.target.value)}
-                            className="w-full px-1.5 py-1 border border-slate-200 rounded-xs font-mono text-center"
-                          />
-                        </td>
-                        <td>
-                          <input
-                            type="number"
-                            min="1"
-                            value={item.quantity}
-                            onChange={(e) => updateItem(index, 'quantity', e.target.value)}
-                            className="w-full px-1.5 py-1 border border-slate-200 rounded-xs font-mono text-center"
-                          />
-                        </td>
-                        <td>
-                          <select
-                            value={item.unit}
-                            onChange={(e) => updateItem(index, 'unit', e.target.value)}
-                            className="w-full px-1 py-1 border border-slate-200 rounded-xs font-mono"
-                          >
-                            <option value="NOS">NOS</option>
-                            <option value="PCS">PCS</option>
-                            <option value="SET">SET</option>
-                            <option value="JOB">JOB</option>
-                            <option value="KGS">KGS</option>
-                          </select>
-                        </td>
-                        <td>
-                          <input
-                            type="number"
-                            step="any"
-                            value={item.rate}
-                            onChange={(e) => updateItem(index, 'rate', e.target.value)}
-                            className="w-full px-2 py-1 border border-slate-200 rounded-xs font-mono text-right"
-                          />
-                        </td>
-                        <td>
-                          <input
-                            type="number"
-                            min="0"
-                            max="100"
-                            value={item.discountPct}
-                            onChange={(e) => updateItem(index, 'discountPct', e.target.value)}
-                            className="w-full px-1 py-1 border border-slate-200 rounded-xs font-mono text-right"
-                          />
-                        </td>
-                        <td>
-                          <select
-                            value={item.gstRate}
-                            onChange={(e) => updateItem(index, 'gstRate', e.target.value)}
-                            className="w-full px-1 py-1 border border-slate-200 rounded-xs font-mono"
-                          >
-                            <option value="0">0%</option>
-                            <option value="5">5%</option>
-                            <option value="12">12%</option>
-                            <option value="18">18%</option>
-                            <option value="28">28%</option>
-                          </select>
-                        </td>
-                        <td className="text-right font-mono font-bold text-slate-900">
-                          {formatINR(item.amount)}
-                        </td>
-                        <td className="text-center">
-                          {items.length > 1 && (
-                            <button
-                              type="button"
-                              onClick={() => removeItem(index)}
-                              className="text-slate-400 hover:text-red-600 p-1"
-                            >
-                              <Trash2 size={14} />
-                            </button>
-                          )}
-                        </td>
-                      </tr>
-                    ))}
-                  </tbody>
-                </table>
-                </div>
-
-                <div className="p-2 bg-slate-50 border-t border-slate-200">
-                  <button
-                    type="button"
-                    onClick={addItem}
-                    className="px-3 py-1.5 bg-white border border-slate-300 hover:bg-slate-100 rounded-xs font-medium text-slate-800 flex items-center gap-1.5"
-                  >
-                    <Plus size={13} />
-                    <span>Add Line Item</span>
-                  </button>
-                </div>
-              </div>
-
-              {/* Tax Summary & Amount In Words */}
-              <div className="grid grid-cols-1 sm:grid-cols-2 gap-6 pt-2">
-                <div>
-                  <label className="block font-medium text-slate-700 mb-1">
-                    Invoice Notes & Terms
-                  </label>
-                  <textarea
-                    rows={3}
-                    value={notes}
-                    onChange={(e) => setNotes(e.target.value)}
-                    className="w-full p-2.5 border border-slate-300 rounded-xs focus:outline-none focus:border-slate-900 font-sans"
-                  />
-                  <div className="mt-2 text-[11px] text-slate-500 font-mono">
-                    Amount in Words:{' '}
-                    <span className="font-semibold text-slate-900">
-                      {numberToWordsIndian(totalInvoiceAmount)}
-                    </span>
-                  </div>
-                </div>
-
-                {/* Calculation breakdown */}
-                <div className="bg-slate-50 border border-slate-200 p-4 rounded-xs space-y-2 font-mono text-xs">
-                  <div className="flex justify-between">
-                    <span className="text-slate-500 font-sans">Subtotal (Gross):</span>
-                    <span>{formatINR(subtotal)}</span>
-                  </div>
-                  {totalDiscount > 0 && (
-                    <div className="flex justify-between text-red-600">
-                      <span className="font-sans">Discount:</span>
-                      <span>- {formatINR(totalDiscount)}</span>
-                    </div>
-                  )}
-                  <div className="flex justify-between border-t border-slate-200 pt-1.5 font-semibold">
-                    <span className="font-sans">Taxable Value:</span>
-                    <span>{formatINR(taxableAmount)}</span>
-                  </div>
-                  {!isInterstate ? (
-                    <>
-                      <div className="flex justify-between text-slate-600">
-                        <span className="font-sans">CGST (Central Tax 9%):</span>
-                        <span>{formatINR(totalCgst)}</span>
-                      </div>
-                      <div className="flex justify-between text-slate-600">
-                        <span className="font-sans">SGST (State Tax 9%):</span>
-                        <span>{formatINR(totalSgst)}</span>
-                      </div>
-                    </>
-                  ) : (
-                    <div className="flex justify-between text-slate-600">
-                      <span className="font-sans">IGST (Integrated Tax 18%):</span>
-                      <span>{formatINR(totalIgst)}</span>
-                    </div>
-                  )}
-                  <div className="flex justify-between border-t border-slate-900 pt-2 text-sm font-bold text-slate-950">
-                    <span className="font-sans">Total Payable (INR):</span>
-                    <span>{formatINR(totalInvoiceAmount)}</span>
-                  </div>
-                </div>
-              </div>
-
-              {/* Action Buttons */}
-              <div className="pt-4 border-t border-slate-200 flex items-center justify-end gap-3">
+              <p className="text-[11px] text-slate-500 font-mono bg-slate-50 border border-slate-200 rounded-xs p-2.5">
+                The payment is allocated fully to this invoice. Posting also books the double entry
+                (DR Bank/Cash, CR Accounts Receivable) and updates the invoice status automatically.
+              </p>
+              <div className="flex items-center justify-end gap-3 pt-2">
                 <button
                   type="button"
-                  onClick={() => setIsCreateModalOpen(false)}
+                  onClick={() => setShowPaymentModal(false)}
                   className="px-4 py-2 border border-slate-300 text-slate-700 rounded-xs hover:bg-slate-50 font-medium"
                 >
                   Cancel
                 </button>
                 <button
-                  type="submit"
-                  disabled={isSubmittingInvoice}
-                  id="submit-invoice-btn"
-                  className="px-6 py-2.5 bg-slate-950 disabled:opacity-50 text-white hover:bg-slate-800 rounded-xs font-semibold flex items-center gap-2"
+                  type="button"
+                  disabled={busyAction !== null}
+                  onClick={() => submitPayment(selectedInvoice, false)}
+                  className="px-4 py-2 bg-white border border-slate-300 disabled:opacity-50 text-slate-800 hover:bg-slate-50 rounded-xs font-semibold"
                 >
-                  {isSubmittingInvoice ? (
+                  Save Draft Only
+                </button>
+                <button
+                  type="button"
+                  disabled={busyAction !== null}
+                  onClick={() => submitPayment(selectedInvoice, true)}
+                  className="px-5 py-2 bg-emerald-700 disabled:opacity-50 text-white hover:bg-emerald-800 rounded-xs font-semibold flex items-center gap-2"
+                >
+                  {busyAction === 'Pay' ? (
                     <>
-                      <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                      <span>Posting & Authorizing Invoice...</span>
+                      <Loader2 size={13} className="animate-spin" />
+                      <span>Recording...</span>
                     </>
                   ) : (
-                    <span>Save & Authorize Invoice</span>
+                    <span>Save & Post Payment</span>
                   )}
                 </button>
               </div>
-            </form>
+            </div>
           </div>
         </div>
       )}
 
       {/* PRINTABLE TAX INVOICE PREVIEW DRAWER */}
       {selectedInvoice && (() => {
-        const cust = customers.find((c) => c.id === selectedInvoice.customerId);
-        const invoiceItems = selectedInvoice.items.map((item: any, idx) => {
+        const inv = selectedInvoice;
+        const isDraft = inv.apiStatus === 'DRAFT';
+        const isFinalized = inv.apiStatus === 'FINALIZED';
+        const isPartiallyPaid = inv.apiStatus === 'PARTIALLY_PAID';
+        const isCancelled = inv.apiStatus === 'CANCELLED';
+        const canFinalize = isDraft && inv.items.length > 0;
+        const canCancel = isFinalized || isPartiallyPaid;
+
+        const cust = customers.find((c) => c.id === inv.customerId);
+        const invoiceItems = inv.items.map((item: any, idx: number) => {
           const qty = Number(item.quantity) || 1;
           const rate = Number(item.unitPrice || item.rate) || 0;
           const taxable = Number(item.taxableAmount || item.amount) || qty * rate;
@@ -734,9 +578,9 @@ export const SalesView: React.FC<SalesViewProps> = ({ navigate }) => {
             discountPct: Number(item.discountPct) || 0,
             gstRate: gstRate,
             amount: taxable,
-            cgst: selectedInvoice.isInterState ? 0 : taxAmt / 2,
-            sgst: selectedInvoice.isInterState ? 0 : taxAmt / 2,
-            igst: selectedInvoice.isInterState ? taxAmt : 0,
+            cgst: inv.isInterState ? 0 : taxAmt / 2,
+            sgst: inv.isInterState ? 0 : taxAmt / 2,
+            igst: inv.isInterState ? taxAmt : 0,
             total: taxable + taxAmt,
           };
         });
@@ -761,34 +605,34 @@ export const SalesView: React.FC<SalesViewProps> = ({ navigate }) => {
             upiId: currentOrg?.upiId || 'acme@hdfcbank',
           },
           customer: {
-            id: selectedInvoice.customerId,
-            name: selectedInvoice.customerName,
+            id: inv.customerId,
+            name: inv.customerName,
             tradeName: cust?.tradeName || '',
-            gstin: selectedInvoice.customerGstin || cust?.gstin || 'UNREGISTERED',
+            gstin: inv.customerGstin || cust?.gstin || 'UNREGISTERED',
             pan: cust?.pan || '',
             billingAddress: cust?.address || 'Corporate Park, Industrial Estate',
             shippingAddress: cust?.address || 'Corporate Park, Industrial Estate',
             city: cust?.city || 'Mumbai',
-            state: cust?.state || selectedInvoice.placeOfSupply || 'Maharashtra (27)',
+            state: cust?.state || inv.placeOfSupply || 'Maharashtra (27)',
             pincode: '',
             email: cust?.email || '',
             phone: cust?.phone || '',
-            placeOfSupply: selectedInvoice.placeOfSupply || cust?.state || 'Maharashtra (27)',
+            placeOfSupply: inv.placeOfSupply || cust?.state || 'Maharashtra (27)',
           },
           metadata: {
-            invoiceNumber: selectedInvoice.invoiceNumber,
-            invoiceDate: selectedInvoice.date,
-            dueDate: selectedInvoice.dueDate,
-            poNumber: 'PO-' + (selectedInvoice.invoiceNumber.replace(/\D/g, '') || '901'),
-            paymentTerms: selectedInvoice.paymentTerms || 'Net 30 Days',
-            reverseCharge: !!selectedInvoice.reverseCharge,
-            isInterstate: !!selectedInvoice.isInterState,
+            invoiceNumber: inv.invoiceNumber,
+            invoiceDate: inv.date,
+            dueDate: inv.dueDate,
+            poNumber: 'PO-' + (inv.invoiceNumber.replace(/\D/g, '') || '901'),
+            paymentTerms: inv.paymentTerms || 'Net 30 Days',
+            reverseCharge: !!inv.reverseCharge,
+            isInterstate: !!inv.isInterState,
           },
           items: invoiceItems,
           additionalDiscount: 0,
           shippingCharges: 0,
-          notes: selectedInvoice.notes || 'Thank you for your business.',
-          termsAndConditions: selectedInvoice.termsAndConditions || '1. Payment within 30 days of invoice date.\n2. Interest @ 18% p.a. on overdue payments.\n3. Subject to Mumbai Jurisdiction.',
+          notes: inv.notes || 'Thank you for your business.',
+          termsAndConditions: inv.termsAndConditions || '1. Payment within 30 days of invoice date.\n2. Interest @ 18% p.a. on overdue payments.\n3. Subject to Mumbai Jurisdiction.',
           authorizedSignatory: 'Amaan Sharma',
           signatoryTitle: 'Authorized Signatory / Finance Director',
         };
@@ -799,7 +643,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ navigate }) => {
           <div className="fixed inset-0 z-50 overflow-hidden">
             <div
               className="absolute inset-0 bg-neutral-950/40 backdrop-blur-2xs"
-              onClick={() => setSelectedInvoice(null)}
+              onClick={() => setSelectedInvoiceId(null)}
             />
             <div className="fixed inset-y-0 right-0 max-w-full flex pl-0 xs:pl-6 sm:pl-10">
               <div className="w-screen max-w-4xl bg-neutral-100 shadow-2xl border-l border-neutral-200 flex flex-col">
@@ -809,7 +653,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ navigate }) => {
                     <span className="text-xs font-mono font-bold uppercase bg-neutral-900 text-white px-2 py-0.5 rounded-xs">
                       TAX INVOICE
                     </span>
-                    <span className="font-mono font-bold text-neutral-900">{selectedInvoice.invoiceNumber}</span>
+                    <span className="font-mono font-bold text-neutral-900">{inv.invoiceNumber}</span>
                   </div>
 
                   {/* Template Switcher Pills */}
@@ -839,7 +683,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ navigate }) => {
                       <span>Print</span>
                     </button>
                     <button
-                      onClick={() => setSelectedInvoice(null)}
+                      onClick={() => setSelectedInvoiceId(null)}
                       className="p-1.5 rounded-xs text-neutral-400 hover:text-neutral-700"
                     >
                       <X size={18} />
@@ -849,37 +693,141 @@ export const SalesView: React.FC<SalesViewProps> = ({ navigate }) => {
 
                 {/* Printable Invoice Body using InvoiceRenderer */}
                 <div className="p-4 sm:p-6 flex-1 overflow-y-auto">
+                  {inv.items.length === 0 && (
+                    <div className="mb-4 bg-amber-50 border border-amber-200 text-amber-800 rounded-xs px-4 py-3 text-xs font-mono">
+                      Line items are loading (GET /invoices/:id)...
+                    </div>
+                  )}
                   <InvoiceRenderer data={drawerFormData} calculations={drawerCalculations} />
                 </div>
 
-                {/* Drawer Footer Actions */}
-                <div className="p-4 border-t border-neutral-200 bg-white flex items-center justify-between">
-                  <div className="flex items-center gap-2">
+                {/* Drawer Footer Actions — backend lifecycle operations */}
+                <div className="p-4 border-t border-neutral-200 bg-white space-y-2">
+                  {actionError && (
+                    <div className="bg-red-50 border border-red-200 text-red-800 rounded-xs px-3 py-2 text-xs flex items-center gap-2">
+                      <AlertCircle size={13} />
+                      {actionError}
+                    </div>
+                  )}
+                  {paySuccess && (
+                    <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xs px-3 py-2 text-xs flex items-center justify-between gap-2">
+                      <span className="flex items-center gap-2">
+                        <CheckCircle2 size={13} />
+                        {paySuccess}
+                      </span>
+                      <button onClick={() => setPaySuccess('')} className="p-0.5 hover:text-emerald-950" title="Dismiss">
+                        <X size={13} />
+                      </button>
+                    </div>
+                  )}
+                  <div className="flex items-center justify-between gap-2">
+                    <div className="flex items-center gap-2 flex-wrap">
+                      {canFinalize && (
+                        <button
+                          onClick={() => handleFinalize(inv)}
+                          disabled={busyAction !== null}
+                          className="px-3 py-1.5 bg-emerald-700 disabled:opacity-50 text-white hover:bg-emerald-800 text-xs font-semibold rounded-xs font-mono flex items-center gap-1.5"
+                          title="Issue the invoice: generates the invoice number and posts the double-entry journal"
+                        >
+                          {busyAction === 'Finalize' ? <Loader2 size={13} className="animate-spin" /> : <ShieldCheck size={13} />}
+                          <span>Finalize & Issue</span>
+                        </button>
+                      )}
+                      {isDraft && inv.items.length === 0 && (
+                        <span className="text-[11px] font-mono text-amber-700">
+                          Loading line items before finalize is available...
+                        </span>
+                      )}
+                      <button
+                        onClick={() => {
+                          const input = window.prompt('Update draft notes', inv.notes || '');
+                          if (input === null) return;
+                          void runInvoiceAction('Update', () =>
+                            dispatch(updateInvoice({ id: inv.id, payload: { notes: input || undefined } })).unwrap(),
+                          );
+                        }}
+                        disabled={busyAction !== null}
+                        className="px-3 py-1.5 bg-white disabled:opacity-50 border border-neutral-300 text-neutral-800 hover:bg-neutral-100 text-xs font-medium rounded-xs font-mono flex items-center gap-1.5"
+                        title="PATCH /invoices/:id — draft notes (full item edits open the editor flow)"
+                      >
+                        {busyAction === 'Update' ? <Loader2 size={13} className="animate-spin" /> : <FileText size={13} />}
+                        <span>Edit Notes</span>
+                      </button>
+                      {canCancel && (
+                        <button
+                          onClick={() => openPaymentModal(inv)}
+                          disabled={busyAction !== null}
+                          className="px-3 py-1.5 bg-emerald-700 disabled:opacity-50 text-white hover:bg-emerald-800 text-xs font-semibold rounded-xs font-mono flex items-center gap-1.5"
+                          title="Record a customer payment against this invoice (creates + posts a payment)"
+                        >
+                          {busyAction === 'Pay' ? <Loader2 size={13} className="animate-spin" /> : <Wallet size={13} />}
+                          <span>Record Payment</span>
+                        </button>
+                      )}
+                      {canCancel && (
+                        <button
+                          onClick={() => handleCancel(inv)}
+                          disabled={busyAction !== null}
+                          className="px-3 py-1.5 bg-white disabled:opacity-50 border border-red-300 text-red-700 hover:bg-red-50 text-xs font-semibold rounded-xs font-mono flex items-center gap-1.5"
+                          title="Cancels the invoice and reverses its posted journal entry"
+                        >
+                          {busyAction === 'Cancel' ? <Loader2 size={13} className="animate-spin" /> : <Ban size={13} />}
+                          <span>Cancel Invoice</span>
+                        </button>
+                      )}
+                      {isDraft && (
+                        <button
+                          onClick={() => handleDeleteDraft(inv)}
+                          disabled={busyAction !== null}
+                          className="px-3 py-1.5 bg-white disabled:opacity-50 border border-neutral-300 text-neutral-700 hover:bg-neutral-100 text-xs font-medium rounded-xs font-mono flex items-center gap-1.5"
+                        >
+                          {busyAction === 'Delete' ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+                          <span>Delete Draft</span>
+                        </button>
+                      )}
+                      {inv.apiStatus === 'PAID' && (
+                        <span className="text-[11px] font-mono text-emerald-700 flex items-center gap-1.5">
+                          <CheckCircle2 size={13} /> Fully paid & settled
+                        </span>
+                      )}
+                      {(inv.apiStatus === 'PAID' || inv.apiStatus === 'PARTIALLY_PAID') && (
+                        <button
+                          onClick={() => {
+                            const posted = paymentsState.items.find(
+                              (p) =>
+                                p.status === PaymentStatus.POSTED &&
+                                p.customerId === inv.customerId &&
+                                p.allocations?.some((a) => a.invoiceId === inv.id),
+                            );
+                            if (posted) {
+                              handleVoidPayment(inv, posted.id, posted.paymentNumber);
+                            } else {
+                              setActionError(
+                                'No posted payment for this invoice in this session to void. Payments made in earlier sessions cannot be listed because the backend has no GET /payments endpoint.',
+                              );
+                            }
+                          }}
+                          disabled={busyAction !== null}
+                          className="px-3 py-1.5 bg-white disabled:opacity-50 border border-amber-300 text-amber-800 hover:bg-amber-50 text-xs font-medium rounded-xs font-mono flex items-center gap-1.5"
+                          title="Void a posted payment (reverses its journal entry) — limited to payments created in this session"
+                        >
+                          {busyAction === 'Void' ? <Loader2 size={13} className="animate-spin" /> : <Ban size={13} />}
+                          <span>Void Payment</span>
+                        </button>
+                      )}
+                      {isCancelled && (
+                        <span className="text-[11px] font-mono text-slate-500 flex items-center gap-1.5">
+                          <Ban size={13} /> Cancelled — journal entry reversed
+                        </span>
+                      )}
+                    </div>
                     <button
-                      onClick={() => {
-                        updateInvoiceStatus(selectedInvoice.id, 'Paid');
-                        setSelectedInvoice({ ...selectedInvoice, status: 'Paid' });
-                      }}
-                      className="px-3 py-1.5 bg-emerald-700 text-white hover:bg-emerald-800 text-xs font-semibold rounded-xs font-mono"
+                      onClick={() => setSelectedInvoiceId(null)}
+                      className="px-4 py-1.5 bg-neutral-900 text-white rounded-xs text-xs font-semibold font-mono"
                     >
-                      Mark as Paid
-                    </button>
-                    <button
-                      onClick={() => {
-                        updateInvoiceStatus(selectedInvoice.id, 'Sent');
-                        setSelectedInvoice({ ...selectedInvoice, status: 'Sent' });
-                      }}
-                      className="px-3 py-1.5 bg-white border border-neutral-300 text-neutral-800 hover:bg-neutral-100 text-xs font-medium rounded-xs font-mono"
-                    >
-                      Mark as Sent
+                      Close
                     </button>
                   </div>
-                  <button
-                    onClick={() => setSelectedInvoice(null)}
-                    className="px-4 py-1.5 bg-neutral-900 text-white rounded-xs text-xs font-semibold font-mono"
-                  >
-                    Close
-                  </button>
                 </div>
               </div>
             </div>

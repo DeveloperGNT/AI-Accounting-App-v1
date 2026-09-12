@@ -79,6 +79,10 @@ export interface Invoice {
   totalAmount: number;
   amountPaid: number;
   status: InvoiceStatus;
+  // Raw backend lifecycle status (DRAFT | FINALIZED | PARTIALLY_PAID | PAID
+  // | CANCELLED). The UI `status` above is the display mapping; apiStatus
+  // drives lifecycle actions (finalize/cancel/delete are status-gated).
+  apiStatus?: 'DRAFT' | 'FINALIZED' | 'PARTIALLY_PAID' | 'PAID' | 'CANCELLED';
   notes?: string;
   termsAndConditions?: string;
   placeOfSupply?: string;

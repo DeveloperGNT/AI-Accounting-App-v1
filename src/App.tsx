@@ -1,9 +1,11 @@
 import React, { useState } from 'react';
 import { AccountingProvider, useAccounting } from './context/AccountingContext';
+import { useAppSelector } from './app/hooks';
 import { LandingPage } from './components/public/LandingPage';
 import { LoginPage } from './components/auth/LoginPage';
 import { SignupPage } from './components/auth/SignupPage';
 import { ForgotPasswordPage } from './components/auth/ForgotPasswordPage';
+import { ResetPasswordPage } from './components/auth/ResetPasswordPage';
 import { CreateOrganizationPage } from './components/onboarding/CreateOrganizationPage';
 import { Sidebar } from './components/layout/Sidebar';
 import { TopNav } from './components/layout/TopNav';
@@ -13,6 +15,7 @@ import { NotificationDrawer } from './components/layout/NotificationDrawer';
 // Main Views
 import { DashboardView } from './components/dashboard/DashboardView';
 import { TransactionsView } from './components/transactions/TransactionsView';
+import { CatalogView } from './components/catalog/CatalogView';
 import { SalesView } from './components/sales/SalesView';
 import { PurchasesView } from './components/purchases/PurchasesView';
 import { ExpensesView } from './components/expenses/ExpensesView';
@@ -29,9 +32,13 @@ import { AuditLogView } from './components/audit/AuditLogView';
 import { InvoiceCreationFlow } from './components/invoices/InvoiceCreationFlow';
 
 const AppContent: React.FC = () => {
-  const { isAuthenticated, currentUser, currentOrg } = useAccounting();
+  const { currentOrg } = useAccounting();
+  const { isAuthenticated, isInitializing } = useAppSelector((state) => state.auth);
 
-  const [currentRoute, setCurrentRoute] = useState<string>('/dashboard');
+  const [currentRoute, setCurrentRoute] = useState<string>(() => {
+    const pathname = window.location.pathname;
+    return pathname === '/reset-password' ? pathname : '/dashboard';
+  });
   const [sidebarCollapsed, setSidebarCollapsed] = useState<boolean>(false);
   const [mobileMenuOpen, setMobileMenuOpen] = useState<boolean>(false);
   const [isSearchOpen, setIsSearchOpen] = useState<boolean>(false);
@@ -43,6 +50,18 @@ const AppContent: React.FC = () => {
     setMobileMenuOpen(false);
     window.scrollTo({ top: 0, behavior: 'smooth' });
   };
+
+  if (isInitializing) {
+    return (
+      <div className="min-h-screen bg-neutral-50 flex items-center justify-center text-xs text-neutral-500 font-mono">
+        Restoring secure session...
+      </div>
+    );
+  }
+
+  if (currentRoute === '/reset-password') {
+    return <ResetPasswordPage navigate={navigate} />;
+  }
 
   // Public / Auth routing if not authenticated
   if (!isAuthenticated) {
@@ -84,6 +103,9 @@ const AppContent: React.FC = () => {
         );
       case '/purchases':
         return <PurchasesView navigate={navigate} />;
+      case '/catalog':
+      case '/products':
+        return <CatalogView navigate={navigate} />;
       case '/expenses':
         return <ExpensesView navigate={navigate} />;
       case '/banking':

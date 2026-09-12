@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect } from 'react';
 import {
   Plus,
   Search,
@@ -13,6 +13,9 @@ import {
   FileText
 } from 'lucide-react';
 import { useAccounting } from '../../context/AccountingContext';
+import { useAppDispatch, useAppSelector } from '../../app/hooks';
+import { fetchCategories } from '../../features/categories/categoriesSlice';
+import { fetchAccounts } from '../../features/accounts/accountsSlice';
 import { formatINR, formatDate } from '../../utils/formatters';
 import { Expense, ExpenseCategory, PaymentMode } from '../../types';
 
@@ -22,6 +25,24 @@ interface ExpensesViewProps {
 
 export const ExpensesView: React.FC<ExpensesViewProps> = ({ navigate }) => {
   const { expenses, addExpense, currentOrg } = useAccounting();
+  const dispatch = useAppDispatch();
+  const categoriesState = useAppSelector((state) => state.categories);
+  const accountsState = useAppSelector((state) => state.accounts);
+
+  // Backend-driven master data: categories from GET /categories and ledger
+  // accounts from GET /accounts. The hardcoded fallbacks keep the UI usable
+  // while the lists are loading or when the API returns no rows yet.
+  useEffect(() => {
+    dispatch(fetchCategories({ page: 1, limit: 100 }));
+    dispatch(fetchAccounts());
+  }, [dispatch]);
+
+  const apiCategoryNames = (categoriesState.list ?? [])
+    .filter((c) => (c.type ?? '').toUpperCase() !== 'INCOME')
+    .map((c) => c.name);
+  const apiAccountOptions = accountsState.items
+    .filter((a: any) => (a.status ?? 'ACTIVE').toUpperCase() === 'ACTIVE')
+    .map((a: any) => ({ label: a.code ? `${a.name} (${a.code})` : a.name, name: a.name as string }));
 
   const [categoryFilter, setCategoryFilter] = useState<string>('All');
   const [searchQuery, setSearchQuery] = useState('');
@@ -41,7 +62,7 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({ navigate }) => {
   const [tdsDeducted, setTdsDeducted] = useState(false);
   const [tdsRate, setTdsRate] = useState('10'); // 10% for professional fees (194J)
 
-  const categories: ExpenseCategory[] = [
+  const fallbackCategories: ExpenseCategory[] = [
     'Rent & Facilities',
     'Electricity & Utilities',
     'Salaries & Wages',
@@ -55,6 +76,17 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({ navigate }) => {
     'Bank Charges',
     'Miscellaneous',
   ];
+
+  const fallbackAccounts = [
+    { label: 'HDFC Current A/c (0060)', name: 'HDFC Current A/c (0060)' },
+    { label: 'ICICI Bank Operating A/c', name: 'ICICI Bank Operating A/c' },
+    { label: 'Cash on Hand (Petty Cash)', name: 'Cash on Hand (Petty Cash)' },
+  ];
+
+  const categoryOptions = Array.from(new Set([...apiCategoryNames, ...fallbackCategories]));
+  const accountOptions = Array.from(
+    new Map([...fallbackAccounts, ...apiAccountOptions].map((a) => [a.name, a])).values(),
+  );
 
   const totalExpenseAmount = expenses.reduce((sum, e) => sum + e.amount, 0);
 
@@ -201,7 +233,7 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({ navigate }) => {
               className="px-2.5 py-1.5 border border-slate-300 rounded-xs bg-white text-slate-800 focus:outline-none"
             >
               <option value="All">All Expense Heads</option>
-              {categories.map((c) => (
+              {categoryOptions.map((c) => (
                 <option key={c} value={c}>
                   {c}
                 </option>
@@ -209,6 +241,21 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({ navigate }) => {
             </select>
           </div>
         </div>
+
+        {(categoriesState.listStatus === 'loading' || accountsState.status === 'loading') && (
+          <div className="text-[10px] font-mono text-slate-500">
+            Loading categories & ledger accounts from server…
+          </div>
+        )}
+        {(categoriesState.listStatus === 'failed' || accountsState.status === 'failed') && (
+          <div className="text-[10px] font-mono text-red-600">
+            Could not load latest categories or accounts
+            {categoriesState.error?.message || accountsState.error
+              ? ` (${categoriesState.error?.message ?? accountsState.error})`
+              : ''}
+            — using built-in defaults.
+          </div>
+        )}
       </div>
 
       {/* Expenses Table */}
@@ -319,7 +366,7 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({ navigate }) => {
                     onChange={(e) => setCategory(e.target.value as ExpenseCategory)}
                     className="w-full px-3 py-2 border border-slate-300 rounded-xs focus:outline-none focus:border-slate-900 bg-white"
                   >
-                    {categories.map((c) => (
+                    {categoryOptions.map((c) => (
                       <option key={c} value={c}>
                         {c}
                       </option>
@@ -412,9 +459,11 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({ navigate }) => {
                     onChange={(e) => setAccount(e.target.value)}
                     className="w-full px-3 py-2 border border-slate-300 rounded-xs font-mono focus:outline-none focus:border-slate-900 bg-white"
                   >
-                    <option value="HDFC Current A/c (0060)">HDFC Current A/c (0060)</option>
-                    <option value="ICICI Bank Operating A/c">ICICI Bank Operating A/c</option>
-                    <option value="Cash on Hand (Petty Cash)">Cash on Hand (Petty Cash)</option>
+                    {accountOptions.map((a) => (
+                      <option key={a.name} value={a.name}>
+                        {a.label}
+                      </option>
+                    ))}
                   </select>
                 </div>
                 <div>

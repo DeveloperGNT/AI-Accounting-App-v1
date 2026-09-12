@@ -1,20 +1,24 @@
 import React, { useState } from 'react';
 import { Eye, EyeOff, ArrowRight, CheckCircle2, Shield } from 'lucide-react';
-import { useAccounting } from '../../context/AccountingContext';
+import { useAppDispatch, useAppSelector } from '../../app/hooks';
+import { signup } from '../../features/auth/authSlice';
 
 interface SignupPageProps {
   navigate: (route: string) => void;
 }
 
 export const SignupPage: React.FC<SignupPageProps> = ({ navigate }) => {
-  const { signup } = useAccounting();
+  const dispatch = useAppDispatch();
+  const authStatus = useAppSelector((state) => state.auth.status);
+  const authError = useAppSelector((state) => state.auth.error);
   const [name, setName] = useState('');
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [confirmPassword, setConfirmPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
+  const [successMessage, setSuccessMessage] = useState('');
+  const loading = authStatus === 'loading';
 
   // Simple password strength calculation
   const getPasswordStrength = () => {
@@ -49,20 +53,21 @@ export const SignupPage: React.FC<SignupPageProps> = ({ navigate }) => {
     }
 
     setError('');
-    setLoading(true);
+    setSuccessMessage('');
 
     try {
-      const res = await signup(name, email, password);
-      if (res.success) {
-        // Direct new user to organization creation onboarding wizard
-        navigate('/create-organization');
+      const result = await dispatch(signup({ name, email, password })).unwrap();
+      if (result.requiresEmailConfirmation) {
+        setSuccessMessage(`Account created. Check ${email} to confirm your email before signing in.`);
       } else {
-        setError(res.error || 'Failed to create user account.');
+        navigate('/create-organization');
       }
-    } catch {
-      setError('An error occurred during registration.');
-    } finally {
-      setLoading(false);
+    } catch (errorResponse) {
+      setError(
+        typeof errorResponse === 'object' && errorResponse && 'message' in errorResponse
+          ? String((errorResponse as { message: unknown }).message)
+          : authError?.message || 'Unable to create the account.',
+      );
     }
   };
 
@@ -97,6 +102,12 @@ export const SignupPage: React.FC<SignupPageProps> = ({ navigate }) => {
         {error && (
           <div className="mb-5 p-3 bg-red-50 border border-red-200 text-red-700 text-xs rounded-xs">
             {error}
+          </div>
+        )}
+
+        {successMessage && (
+          <div className="mb-5 p-3 bg-emerald-50 border border-emerald-200 text-emerald-800 text-xs rounded-xs">
+            {successMessage}
           </div>
         )}
 

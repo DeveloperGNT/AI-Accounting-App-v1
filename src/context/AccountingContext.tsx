@@ -1,4 +1,4 @@
-import React, { createContext, useContext, useState, useEffect } from 'react';
+import React, { createContext, useContext, useState, useEffect, useMemo } from 'react';
 import {
   User,
   Organization,
@@ -19,12 +19,7 @@ import {
   Role
 } from '../types';
 import {
-  INITIAL_USER,
-  INITIAL_USERS,
   INITIAL_ORGANIZATIONS,
-  INITIAL_CUSTOMERS,
-  INITIAL_VENDORS,
-  INITIAL_INVOICES,
   INITIAL_PURCHASE_BILLS,
   INITIAL_EXPENSES,
   INITIAL_TRANSACTIONS,
@@ -37,6 +32,72 @@ import {
   INITIAL_NOTIFICATIONS,
   SAMPLE_DOCUMENTS
 } from '../data/mockData';
+import { useAppDispatch, useAppSelector } from '../app/hooks';
+import {
+  createOrganization as createOrganizationThunk,
+  selectOrganization as selectOrganizationAction,
+  updateCurrentOrganization as updateCurrentOrganizationThunk,
+} from '../features/organizations/organizationsSlice';
+import {
+  toCreateOrganizationRequest,
+  toUiOrganization,
+} from '../features/organizations/orgMappers';
+import { fetchCustomers as fetchCustomersThunk } from '../features/customers/customersSlice';
+import { fetchVendors as fetchVendorsThunk } from '../features/vendors/vendorsSlice';
+import {
+  fetchInvoices as fetchInvoicesThunk,
+} from '../features/invoices/invoicesSlice';
+import {
+  toUiInvoice,
+  toCreateInvoiceRequest,
+} from '../features/invoices/invoiceMappers';
+import type { Customer as ApiCustomer } from '../api/customersTypes';
+import type { Vendor as ApiVendor } from '../api/vendorsTypes';
+import type { UpdateOrganizationRequest } from '../api/types';
+
+// Map an API customer record onto the legacy UI Customer shape used by the
+// context consumers (invoices editor, dashboards, etc.). Fields the backend
+// does not track yet (outstanding balances, total sales) default to zero.
+const toUiCustomer = (c: ApiCustomer): Customer => ({
+  id: c.id,
+  orgId: c.organizationId,
+  name: c.name,
+  tradeName: (c as unknown as Record<string, unknown>).tradeName as string | undefined,
+  gstin: c.gstin ?? '',
+  pan: c.pan ?? '',
+  contactPerson: (c as unknown as Record<string, unknown>).contactPerson as string | undefined,
+  email: c.email ?? '',
+  phone: c.phone ?? '',
+  address: c.address ?? '',
+  city: c.city ?? '',
+  state: c.state ?? '',
+  creditLimit: c.creditLimit ?? 0,
+  outstandingBalance: (c as unknown as Record<string, unknown>).outstandingBalance as number | undefined ?? 0,
+  totalSales: 0,
+  paymentTermsDays: c.paymentTermsDays ?? 30,
+});
+
+const toUiVendor = (v: ApiVendor): Vendor => ({
+  id: v.id,
+  orgId: v.organizationId,
+  name: v.name,
+  tradeName: (v as unknown as Record<string, unknown>).tradeName as string | undefined,
+  gstin: v.gstin ?? '',
+  pan: v.pan ?? '',
+  contactPerson: (v as unknown as Record<string, unknown>).contactPerson as string | undefined,
+  email: v.email ?? '',
+  phone: v.phone ?? '',
+  address: v.address ?? '',
+  city: v.city ?? '',
+  state: v.state ?? '',
+  bankAccount: v.bankAccount,
+  bankIfsc: v.bankIfsc,
+  bankName: v.bankName,
+  outstandingBalance: 0,
+  payablesBalance: 0,
+  totalPurchases: 0,
+  paymentTermsDays: v.paymentTermsDays ?? 30,
+});
 
 export interface CreateOrganizationParams extends Omit<Organization, 'id' | 'createdAt' | 'userRole'> {
   bankName?: string;
@@ -54,15 +115,9 @@ interface AccountingContextType {
   currentUser: User | null;
   currentOrg: Organization | null;
   organizations: Organization[];
-  users: User[];
-  isAuthenticated: boolean;
-  login: (email: string, password?: string) => Promise<{ success: boolean; error?: string }>;
-  signup: (name: string, email: string, password?: string) => Promise<{ success: boolean; error?: string }>;
-  logout: () => void;
   switchOrganization: (orgId: string) => void;
   createOrganization: (orgData: CreateOrganizationParams) => Promise<Organization>;
   updateOrganization: (orgId: string | Partial<Organization>, data?: Partial<Organization>) => void;
-  inviteUser: (name: string, email: string, role: Role, orgId: string) => void;
 
   // Accounting Records State
   invoices: Invoice[];
@@ -80,10 +135,9 @@ interface AccountingContextType {
   notifications: AppNotification[];
   documents: DocumentExtraction[];
 
-  // Mutations
-  addInvoice: (invoice: Omit<Invoice, 'id' | 'orgId'>) => Invoice;
-  updateInvoiceStatus: (id: string, status: Invoice['status']) => void;
-  deleteInvoice: (id: string) => void;
+  // NOTE: no invoice mutations here — SalesView and InvoiceCreationFlow use
+  // the invoicesSlice thunks directly (create/finalize/cancel/update/delete),
+  // so every invoice operation flows through dispatch().
 
   addPurchaseBill: (bill: Omit<PurchaseBill, 'id' | 'orgId'>) => PurchaseBill;
   updatePurchaseBillStatus: (id: string, status: PurchaseBill['status']) => void;
@@ -91,8 +145,6 @@ interface AccountingContextType {
 
   addTransaction: (transaction: Omit<Transaction, 'id' | 'orgId'>) => Transaction;
   addExpense: (expense: Omit<Expense, 'id' | 'orgId'>) => Expense;
-  addCustomer: (customer: Omit<Customer, 'id' | 'orgId' | 'totalSales' | 'outstandingBalance'>) => Customer;
-  addVendor: (vendor: Omit<Vendor, 'id' | 'orgId' | 'totalPurchases' | 'payablesBalance'>) => Vendor;
 
   reconcileBankFeed: (feedId: string, action: 'Matched' | 'Ignored') => void;
   reconcileStatementLine: (lineId: string, matchedTxId?: string) => void;
@@ -121,16 +173,11 @@ interface AccountingContextType {
 const AccountingContext = createContext<AccountingContextType | undefined>(undefined);
 
 const STORAGE_KEYS = {
-  USER: 'ai_acc_user',
-  USERS: 'ai_acc_users',
   CURRENT_ORG_ID: 'ai_acc_current_org_id',
   ORGS: 'ai_acc_orgs',
-  INVOICES: 'ai_acc_invoices',
   PURCHASE_BILLS: 'ai_acc_purchase_bills',
   TRANSACTIONS: 'ai_acc_transactions',
   EXPENSES: 'ai_acc_expenses',
-  CUSTOMERS: 'ai_acc_customers',
-  VENDORS: 'ai_acc_vendors',
   BANK_ACCOUNTS: 'ai_acc_banks',
   BANK_FEEDS: 'ai_acc_feeds',
   BANK_STMT_LINES: 'ai_acc_stmt_lines',
@@ -141,34 +188,73 @@ const STORAGE_KEYS = {
 };
 
 export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Initialize user & organization from localStorage or defaults
-  const [currentUser, setCurrentUser] = useState<User | null>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.USER);
-    return saved ? JSON.parse(saved) : INITIAL_USER;
-  });
+  // Authentication is owned by Redux/Supabase; this remains for existing business display/audit consumers.
+  const [currentUser] = useState<User | null>(null);
 
-  const [users, setUsers] = useState<User[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.USERS);
-    return saved ? JSON.parse(saved) : INITIAL_USERS;
-  });
+  const dispatch = useAppDispatch();
+  // Real backend organization state (Redux). Falls back to mock data only
+  // while the API data has not loaded (e.g. offline dev), never merged.
+  const orgState = useAppSelector((state) => state.organizations);
+  const hasApiOrgs = orgState.items.length > 0 || orgState.status === 'succeeded';
+  const organizations = hasApiOrgs
+    ? orgState.items.map(toUiOrganization)
+    : INITIAL_ORGANIZATIONS;
+  const currentOrg = hasApiOrgs
+    ? (orgState.items.find((o) => o.id === orgState.activeOrganizationId)
+        ? toUiOrganization(
+            orgState.items.find((o) => o.id === orgState.activeOrganizationId)!,
+          )
+        : null)
+    : organizations[0] || null;
 
-  const [organizations, setOrganizations] = useState<Organization[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.ORGS);
-    return saved ? JSON.parse(saved) : INITIAL_ORGANIZATIONS;
-  });
+  // Customer and vendor masters come from the backend via the customers/
+  // vendors Redux slices (GET /customers, GET /vendors). The backend's
+  // TenantAccessGuard rejects any request without the x-organization-id
+  // header, so wait until an active organization is resolved before fetching,
+  // and refetch whenever the tenant switches so lists never mix tenants.
+  const activeOrganizationId = useAppSelector(
+    (state) => state.organizations.activeOrganizationId,
+  );
 
-  const [currentOrgId, setCurrentOrgId] = useState<string>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.CURRENT_ORG_ID);
-    return saved || 'org_acme';
-  });
+  useEffect(() => {
+    if (activeOrganizationId) {
+      void dispatch(fetchCustomersThunk());
+    }
+  }, [activeOrganizationId, dispatch]);
 
-  const currentOrg = organizations.find((o) => o.id === currentOrgId) || organizations[0] || null;
+  useEffect(() => {
+    if (activeOrganizationId) {
+      void dispatch(fetchVendorsThunk());
+    }
+  }, [activeOrganizationId, dispatch]);
 
-  // Data collections
-  const [invoices, setInvoices] = useState<Invoice[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.INVOICES);
-    return saved ? JSON.parse(saved) : INITIAL_INVOICES;
-  });
+  const customersState = useAppSelector((state) => state.customers);
+  const vendorsState = useAppSelector((state) => state.vendors);
+
+  const customers = useMemo<Customer[]>(
+    () => customersState.items.map(toUiCustomer),
+    [customersState.items],
+  );
+  const vendors = useMemo<Vendor[]>(
+    () => vendorsState.items.map(toUiVendor),
+    [vendorsState.items],
+  );
+
+  // Invoices come from the backend via the invoices Redux slice
+  // (GET /invoices). Like customers/vendors, the fetch must wait for an
+  // active organization (TenantAccessGuard rejects headerless requests) and
+  // re-run when the tenant switches.
+  const invoicesState = useAppSelector((state) => state.invoices);
+  useEffect(() => {
+    if (activeOrganizationId) {
+      void dispatch(fetchInvoicesThunk());
+    }
+  }, [activeOrganizationId, dispatch]);
+
+  const invoices = useMemo<Invoice[]>(
+    () => invoicesState.items.map(toUiInvoice),
+    [invoicesState.items],
+  );
 
   const [purchaseBills, setPurchaseBills] = useState<PurchaseBill[]>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.PURCHASE_BILLS);
@@ -183,16 +269,6 @@ export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   const [expenses, setExpenses] = useState<Expense[]>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.EXPENSES);
     return saved ? JSON.parse(saved) : INITIAL_EXPENSES;
-  });
-
-  const [customers, setCustomers] = useState<Customer[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.CUSTOMERS);
-    return saved ? JSON.parse(saved) : INITIAL_CUSTOMERS;
-  });
-
-  const [vendors, setVendors] = useState<Vendor[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.VENDORS);
-    return saved ? JSON.parse(saved) : INITIAL_VENDORS;
   });
 
   const [bankAccounts, setBankAccounts] = useState<BankAccount[]>(() => {
@@ -232,28 +308,8 @@ export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     return saved ? JSON.parse(saved) : SAMPLE_DOCUMENTS;
   });
 
-  // Save changes to localStorage for persistence
-  useEffect(() => {
-    if (currentUser) localStorage.setItem(STORAGE_KEYS.USER, JSON.stringify(currentUser));
-    else localStorage.removeItem(STORAGE_KEYS.USER);
-  }, [currentUser]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.USERS, JSON.stringify(users));
-  }, [users]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.ORGS, JSON.stringify(organizations));
-  }, [organizations]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.CURRENT_ORG_ID, currentOrgId);
-  }, [currentOrgId]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.INVOICES, JSON.stringify(invoices));
-  }, [invoices]);
-
+  // Save changes to localStorage for persistence. Invoices are backend-
+  // owned now and no longer persisted locally.
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.PURCHASE_BILLS, JSON.stringify(purchaseBills));
   }, [purchaseBills]);
@@ -265,14 +321,6 @@ export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.EXPENSES, JSON.stringify(expenses));
   }, [expenses]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.CUSTOMERS, JSON.stringify(customers));
-  }, [customers]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.VENDORS, JSON.stringify(vendors));
-  }, [vendors]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.BANK_ACCOUNTS, JSON.stringify(bankAccounts));
@@ -318,221 +366,51 @@ export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     setAuditLogs((prev) => [newEntry, ...prev]);
   };
 
-  // Auth Operations
-  const login = async (email: string, _password?: string) => {
-    await new Promise((res) => setTimeout(res, 200));
-    const user: User = {
-      id: 'usr_01',
-      name: email.split('@')[0].replace('.', ' ').toUpperCase() || 'Amaan Sharma',
-      email,
-      role: 'Owner',
-      avatar: (email[0] + (email[1] || '')).toUpperCase(),
-    };
-    setCurrentUser(user);
-    addAuditEntry('User Logged In', 'Authentication', `Session started: ${email}`);
-    return { success: true };
-  };
-
-  const signup = async (name: string, email: string, _password?: string) => {
-    await new Promise((res) => setTimeout(res, 200));
-    const user: User = {
-      id: `usr_${Date.now()}`,
-      name: name || 'User',
-      email,
-      role: 'Owner',
-      avatar: (name || 'US').slice(0, 2).toUpperCase(),
-    };
-    setCurrentUser(user);
-    addAuditEntry('User Registered', 'Authentication', `New account created: ${email}`);
-    return { success: true };
-  };
-
-  const logout = () => {
-    addAuditEntry('User Logged Out', 'Authentication', 'Session ended gracefully');
-    setCurrentUser(null);
-  };
-
   const switchOrganization = (orgId: string) => {
     const target = organizations.find((o) => o.id === orgId);
     if (target) {
-      setCurrentOrgId(target.id);
+      dispatch(selectOrganizationAction(target.id));
       addAuditEntry('Switched Organization Tenant', 'Workspace', `Switched to ${target.name}`);
     }
   };
 
   const createOrganization = async (orgData: CreateOrganizationParams): Promise<Organization> => {
-    const orgId = `org_${Date.now()}`;
-    const newOrg: Organization = {
-      id: orgId,
-      name: orgData.name,
-      tradeName: orgData.tradeName,
-      businessType: orgData.businessType,
-      gstin: orgData.gstin,
-      pan: orgData.pan,
-      financialYear: orgData.financialYear || '2026–27',
-      address: orgData.address || '',
-      city: orgData.city || '',
-      state: orgData.state || '',
-      pincode: orgData.pincode || '',
-      email: orgData.email || '',
-      phone: orgData.phone || '',
-      createdAt: new Date().toISOString(),
-      userRole: 'Owner',
-    };
+    const result = await dispatch(
+      createOrganizationThunk(toCreateOrganizationRequest(orgData)),
+    ).unwrap();
 
-    // Auto-provision initial primary bank account and cash ledger for this new business tenant
-    const newBankAccounts: BankAccount[] = [];
-    if (orgData.bankName && orgData.accountNumber) {
-      newBankAccounts.push({
-        id: `bank_${Date.now()}_1`,
-        orgId: newOrg.id,
-        bankName: orgData.bankName,
-        accountNumber: orgData.accountNumber,
-        accountType: (orgData.accountType || 'Current Account') as any,
-        branch: orgData.branch || `${orgData.city || 'Main'} Branch`,
-        ifsc: orgData.ifsc || 'HDFC0000001',
-        currentBalance: orgData.openingBalance || 0,
-        bookBalance: orgData.openingBalance || 0,
-        lastSynced: new Date().toISOString(),
-        unreconciledCount: 0,
-      });
-    } else {
-      newBankAccounts.push({
-        id: `bank_${Date.now()}_1`,
-        orgId: newOrg.id,
-        bankName: 'HDFC Bank (Primary Operating)',
-        accountNumber: '502000' + Math.floor(10000000 + Math.random() * 90000000),
-        accountType: 'Current Account',
-        branch: `${orgData.city || 'Corporate'} Branch`,
-        ifsc: 'HDFC0000060',
-        currentBalance: orgData.openingBalance || 250000,
-        bookBalance: orgData.openingBalance || 250000,
-        lastSynced: new Date().toISOString(),
-        unreconciledCount: 0,
-      });
-    }
-
-    newBankAccounts.push({
-      id: `bank_${Date.now()}_cash`,
-      orgId: newOrg.id,
-      bankName: 'Cash on Hand (Petty Cash)',
-      accountNumber: 'CASH-LEDGER-01',
-      accountType: 'Cash Account' as any,
-      branch: 'Corporate Vault',
-      ifsc: 'N/A',
-      currentBalance: 15000,
-      bookBalance: 15000,
-      lastSynced: new Date().toISOString(),
-      unreconciledCount: 0,
-    });
-
-    setBankAccounts((prev) => [...prev, ...newBankAccounts]);
-
-    // Add initial Capital Introduction / Opening Balance voucher
-    const openingAmt = orgData.openingBalance || 250000;
-    if (openingAmt > 0) {
-      const openingTx: Transaction = {
-        id: `tx_${Date.now()}_open`,
-        orgId: newOrg.id,
-        date: '2026-04-01',
-        description: 'Opening Capital Introduction & Bank Balance Provision',
-        type: 'Receipt',
-        partyName: 'Promoters Equity / Share Capital',
-        partyType: 'Ledger',
-        amount: openingAmt,
-        taxableAmount: openingAmt,
-        gstAmount: 0,
-        gstRate: 0,
-        status: 'Reconciled',
-        account: newBankAccounts[0].bankName,
-        referenceNo: 'JV-OPEN-001',
-      };
-      setTransactions((prev) => [openingTx, ...prev]);
-    }
-
-    setOrganizations((prev) => [...prev, newOrg]);
-    setCurrentOrgId(newOrg.id);
-    addAuditEntry('Created Organization Tenant', 'Settings', `Organization: ${newOrg.name} (${newOrg.businessType})`);
-    return newOrg;
+    addAuditEntry(
+      'Created Organization Tenant',
+      'Settings',
+      `Organization: ${result.name} (${result.business_type || 'Business'})`,
+    );
+    return toUiOrganization(result);
   };
 
   const updateOrganization = (orgIdOrData: string | Partial<Organization>, data?: Partial<Organization>) => {
-    const targetId = typeof orgIdOrData === 'string' ? orgIdOrData : currentOrg?.id;
     const payload = typeof orgIdOrData === 'string' ? (data || {}) : orgIdOrData;
 
-    if (!targetId) return;
-    setOrganizations((prev) =>
-      prev.map((org) => (org.id === targetId ? { ...org, ...payload } : org))
-    );
-    addAuditEntry('Updated Business Profile', 'Settings', `Updated profile settings for organization`);
-  };
-
-  const inviteUser = (name: string, email: string, role: Role, orgId: string) => {
-    const newUser: User = {
-      id: `usr_${Date.now()}`,
-      name: name || 'User',
-      email,
-      role,
-      avatar: (name || 'US').slice(0, 2).toUpperCase(),
+    // The backend PATCH /organizations/current contract only accepts
+    // name, slug, business_type, gstin, email, phone, website, logo_url.
+    // Other UI fields (address, city, state, PIN, PAN) are not supported by
+    // the backend yet and are intentionally not sent.
+    const requestPayload: UpdateOrganizationRequest = {
+      ...(typeof payload.name === 'string' && payload.name.trim() ? { name: payload.name.trim() } : {}),
+      ...(typeof payload.gstin === 'string' && payload.gstin.trim() ? { gstin: payload.gstin.trim() } : {}),
+      ...(typeof payload.email === 'string' && payload.email.trim() ? { email: payload.email.trim() } : {}),
+      ...(typeof payload.phone === 'string' && payload.phone.trim() ? { phone: payload.phone.trim() } : {}),
     };
-    setUsers((prev) => [...prev, newUser]);
-    addAuditEntry('Invited Team Member', 'Settings', `Invited ${name} (${email}) as ${role}`);
-  };
 
-  // Record Mutations
-  const addInvoice = (invoiceData: Omit<Invoice, 'id' | 'orgId'>): Invoice => {
-    const newInvoice: Invoice = {
-      ...invoiceData,
-      id: `inv_${Date.now()}`,
-      orgId: currentOrg?.id || 'org_acme',
-    };
-    setInvoices((prev) => [newInvoice, ...prev]);
-
-    const newTx: Transaction = {
-      id: `tx_${Date.now()}`,
-      orgId: currentOrg?.id || 'org_acme',
-      date: newInvoice.date,
-      description: `Tax Invoice #${newInvoice.invoiceNumber}`,
-      type: 'Sale',
-      partyName: newInvoice.customerName,
-      partyType: 'Customer',
-      partyGstin: newInvoice.customerGstin,
-      amount: newInvoice.totalAmount,
-      taxableAmount: newInvoice.taxableAmount,
-      gstAmount: newInvoice.cgst + newInvoice.sgst + newInvoice.igst,
-      gstRate: 18,
-      status: newInvoice.status === 'Paid' ? 'Paid' : 'Categorized',
-      account: 'HDFC Current A/c (0060)',
-      referenceNo: newInvoice.invoiceNumber,
-    };
-    setTransactions((prev) => [newTx, ...prev]);
-
-    if (newInvoice.status !== 'Paid') {
-      setCustomers((prev) =>
-        prev.map((c) =>
-          c.name === newInvoice.customerName
-            ? { ...c, outstandingBalance: c.outstandingBalance + (newInvoice.totalAmount - newInvoice.amountPaid) }
-            : c
+    if (Object.keys(requestPayload).length > 0) {
+      void dispatch(updateCurrentOrganizationThunk(requestPayload))
+        .then(() =>
+          addAuditEntry('Updated Business Profile', 'Settings', 'Updated profile settings for organization'),
         )
-      );
+        .catch(() => undefined);
     }
-
-    addAuditEntry('Created Tax Invoice', 'Sales', `${newInvoice.invoiceNumber} (${newInvoice.customerName})`);
-    return newInvoice;
   };
 
-  const updateInvoiceStatus = (id: string, status: Invoice['status']) => {
-    setInvoices((prev) =>
-      prev.map((inv) => (inv.id === id ? { ...inv, status } : inv))
-    );
-    addAuditEntry('Updated Invoice Status', 'Sales', `Invoice #${id} set to ${status}`);
-  };
 
-  const deleteInvoice = (id: string) => {
-    const target = invoices.find((i) => i.id === id);
-    setInvoices((prev) => prev.filter((inv) => inv.id !== id));
-    addAuditEntry('Deleted Invoice', 'Sales', `Invoice #${target?.invoiceNumber || id}`);
-  };
 
   // Purchase Bills Mutations
   const addPurchaseBill = (billData: Omit<PurchaseBill, 'id' | 'orgId'>): PurchaseBill => {
@@ -620,32 +498,6 @@ export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     return newExp;
   };
 
-  const addCustomer = (custData: Omit<Customer, 'id' | 'orgId' | 'totalSales' | 'outstandingBalance'>): Customer => {
-    const newCustomer: Customer = {
-      ...custData,
-      id: `cust_${Date.now()}`,
-      orgId: currentOrg?.id || 'org_acme',
-      outstandingBalance: 0,
-      totalSales: 0,
-    };
-    setCustomers((prev) => [newCustomer, ...prev]);
-    addAuditEntry('Added Customer', 'Contacts', newCustomer.name);
-    return newCustomer;
-  };
-
-  const addVendor = (vendorData: Omit<Vendor, 'id' | 'orgId' | 'totalPurchases' | 'payablesBalance'>): Vendor => {
-    const newVendor: Vendor = {
-      ...vendorData,
-      id: `vend_${Date.now()}`,
-      orgId: currentOrg?.id || 'org_acme',
-      payablesBalance: 0,
-      totalPurchases: 0,
-    };
-    setVendors((prev) => [newVendor, ...prev]);
-    addAuditEntry('Added Vendor', 'Contacts', newVendor.name);
-    return newVendor;
-  };
-
   const reconcileBankFeed = (feedId: string, action: 'Matched' | 'Ignored') => {
     setBankFeeds((prev) =>
       prev.map((f) => (f.id === feedId ? { ...f, status: action } : f))
@@ -717,7 +569,7 @@ export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   };
 
   // Tenant Scoped Data Slices
-  const activeOrgId = currentOrg?.id || currentOrgId || 'org_acme';
+  const activeOrgId = currentOrg?.id || 'unassigned';
 
   const orgInvoices = invoices.filter((i) => (i.orgId || 'org_acme') === activeOrgId);
   const orgPurchaseBills = purchaseBills.filter((b) => (b.orgId || 'org_acme') === activeOrgId);
@@ -760,15 +612,9 @@ export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         currentUser,
         currentOrg,
         organizations,
-        users,
-        isAuthenticated: !!currentUser,
-        login,
-        signup,
-        logout,
         switchOrganization,
         createOrganization,
         updateOrganization,
-        inviteUser,
 
         invoices: orgInvoices,
         purchaseBills: orgPurchaseBills,
@@ -785,16 +631,11 @@ export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         notifications: orgNotifications,
         documents: orgDocuments,
 
-        addInvoice,
-        updateInvoiceStatus,
-        deleteInvoice,
         addPurchaseBill,
         updatePurchaseBillStatus,
         deletePurchaseBill,
         addTransaction,
         addExpense,
-        addCustomer,
-        addVendor,
         reconcileBankFeed,
         reconcileStatementLine,
         handleReviewItem,

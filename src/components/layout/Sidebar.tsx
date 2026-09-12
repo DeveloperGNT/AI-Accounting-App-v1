@@ -61,6 +61,7 @@ export const Sidebar: React.FC<SidebarProps> = ({
       items: [
         { label: 'Customers', route: '/customers', icon: Users },
         { label: 'Vendors', route: '/vendors', icon: Briefcase },
+        { label: 'Catalog & Ledgers', route: '/catalog', icon: FileText },
       ],
     },
     {

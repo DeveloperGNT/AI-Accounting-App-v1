@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useEffect, useState } from 'react';
 import {
   Building2,
   Users,
@@ -15,13 +15,27 @@ import {
 } from 'lucide-react';
 import { useAccounting } from '../../context/AccountingContext';
 import { UserRole } from '../../types';
+import { useAppDispatch, useAppSelector } from '../../app/hooks';
+import { fetchCurrentOrganization } from '../../features/organizations/organizationsSlice';
+import {
+  fetchMemberships,
+  createInvitation,
+  updateMemberRole,
+  deleteMembership,
+  transferMembershipOwnership,
+} from '../../features/memberships/membershipsSlice';
+import type { Membership } from '../../api/membershipsTypes';
 
 interface SettingsViewProps {
   navigate: (route: string) => void;
 }
 
 export const SettingsView: React.FC<SettingsViewProps> = ({ navigate }) => {
-  const { currentOrg, currentUser, updateOrganization, users, inviteUser } = useAccounting();
+  const { currentOrg, currentUser, updateOrganization } = useAccounting();
+  const dispatch = useAppDispatch();
+  const { currentStatus, error: orgError } = useAppSelector((state) => state.organizations);
+  const membershipsState = useAppSelector((state) => state.memberships);
+  const memberships = membershipsState.list;
 
   const [activeTab, setActiveTab] = useState<'profile' | 'users' | 'coa' | 'integrations'>('profile');
 
@@ -36,18 +50,52 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ navigate }) => {
   const [pincode, setPincode] = useState(currentOrg?.pincode || '');
   const [savedSuccess, setSavedSuccess] = useState(false);
   const [isSubmittingProfile, setIsSubmittingProfile] = useState(false);
+  const [profileError, setProfileError] = useState<string | null>(null);
+
+  // Load the backend's authoritative copy of the current organization
+  // whenever the profile tab is opened.
+  useEffect(() => {
+    if (activeTab === 'profile' && currentStatus === 'idle') {
+      void dispatch(fetchCurrentOrganization());
+    }
+  }, [activeTab, currentStatus, dispatch]);
+
+  useEffect(() => {
+    if (currentStatus === 'succeeded' && currentOrg) {
+      setName((prev) => prev || currentOrg.name);
+      setGstin((prev) => prev || currentOrg.gstin);
+    }
+  }, [currentStatus, currentOrg]);
 
   // Invite user state
   const [isInviteModalOpen, setIsInviteModalOpen] = useState(false);
-  const [inviteName, setInviteName] = useState('');
   const [inviteEmail, setInviteEmail] = useState('');
   const [inviteRole, setInviteRole] = useState<UserRole>('Accountant');
+  const [inviteError, setInviteError] = useState<string | null>(null);
+  const [memberBusyId, setMemberBusyId] = useState<string | null>(null);
+
+  // Team roster comes from GET /memberships. Role UUIDs are learned from the
+  // roster itself (each membership carries its role id + name), the only role
+  // source the existing frontend API layer exposes.
+  useEffect(() => {
+    if (activeTab === 'users' && membershipsState.listStatus === 'idle') {
+      void dispatch(fetchMemberships());
+    }
+  }, [activeTab, membershipsState.listStatus, dispatch]);
+
+  const roleIdFor = (uiRole: UserRole): string | undefined =>
+    memberships.find((m) => m.role?.name?.toUpperCase() === uiRole.toUpperCase())?.role?.id;
+
+  const roleOptions = Array.from(
+    new Map(memberships.map((m) => [m.role?.name ?? '', m.role])).values(),
+  ).filter((r): r is NonNullable<Membership['role']> => r != null && r.name.toUpperCase() !== 'OWNER');
 
   const handleSaveProfile = (e: React.FormEvent) => {
     e.preventDefault();
     if (currentOrg && !isSubmittingProfile) {
       setIsSubmittingProfile(true);
-      setTimeout(() => {
+      setProfileError(null);
+      try {
         updateOrganization(currentOrg.id, {
           name,
           tradeName,
@@ -58,20 +106,87 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ navigate }) => {
           state,
           pincode,
         });
-        setIsSubmittingProfile(false);
         setSavedSuccess(true);
         setTimeout(() => setSavedSuccess(false), 2500);
-      }, 400);
+      } catch {
+        setProfileError('Unable to update the organization profile. Please try again.');
+      } finally {
+        setIsSubmittingProfile(false);
+      }
     }
   };
 
-  const handleInvite = (e: React.FormEvent) => {
+  const handleInvite = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (inviteEmail && currentOrg) {
-      inviteUser(inviteName, inviteEmail, inviteRole, currentOrg.id);
+    if (!inviteEmail || !currentOrg) return;
+    const roleId = roleIdFor(inviteRole);
+    if (!roleId) {
+      setInviteError(
+        `No "${inviteRole}" role is available in this organization yet. Available roles: ${
+          roleOptions.map((r) => r.name).join(', ') || 'none loaded'
+        }.`,
+      );
+      return;
+    }
+    setInviteError(null);
+    setMemberBusyId('invite');
+    try {
+      await dispatch(createInvitation({ email: inviteEmail.trim(), roleId })).unwrap();
       setIsInviteModalOpen(false);
-      setInviteName('');
       setInviteEmail('');
+      void dispatch(fetchMemberships());
+    } catch (err: any) {
+      setInviteError(err?.message || 'Failed to send invitation.');
+    } finally {
+      setMemberBusyId(null);
+    }
+  };
+
+  const handleRoleChange = async (membership: Membership, newRoleName: string) => {
+    if (!membership.role || membership.role.name === newRoleName) return;
+    const targetRoleId = memberships.find((m) => m.role?.name === newRoleName)?.role?.id;
+    if (!targetRoleId) return;
+    setMemberBusyId(membership.id);
+    try {
+      await dispatch(
+        updateMemberRole({ id: membership.id, payload: { roleId: targetRoleId } }),
+      ).unwrap();
+      void dispatch(fetchMemberships());
+    } catch (err: any) {
+      window.alert(err?.message || 'Failed to update member role.');
+    } finally {
+      setMemberBusyId(null);
+    }
+  };
+
+  const handleRemoveMember = async (membership: Membership) => {
+    if (!window.confirm('Remove this member from the organization?')) return;
+    setMemberBusyId(membership.id);
+    try {
+      await dispatch(deleteMembership({ id: membership.id })).unwrap();
+      void dispatch(fetchMemberships());
+    } catch (err: any) {
+      window.alert(err?.message || 'Failed to remove member.');
+    } finally {
+      setMemberBusyId(null);
+    }
+  };
+
+  const handleTransferOwnership = async (membership: Membership) => {
+    if (
+      !window.confirm(
+        'Transfer organization ownership to this member? You will lose OWNER privileges.',
+      )
+    )
+      return;
+    setMemberBusyId(membership.id);
+    try {
+      await dispatch(transferMembershipOwnership({ id: membership.id })).unwrap();
+      void dispatch(fetchMemberships());
+    } catch (err: any) {
+      window.alert(err?.message || 'Failed to transfer ownership.');
+    } finally {
+      setMemberBusyId(null);
     }
   };
 
@@ -143,6 +258,20 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ navigate }) => {
               <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-900 rounded-xs flex items-center gap-2">
                 <CheckCircle2 size={16} className="text-emerald-700" />
                 <span>Organization master parameters updated successfully.</span>
+              </div>
+            )}
+
+            {(profileError || (activeTab === 'profile' && currentStatus === 'failed' && orgError)) && (
+              <div className="p-3 bg-red-50 border border-red-200 text-red-800 rounded-xs flex items-center gap-2">
+                <AlertCircle size={16} className="text-red-600" />
+                <span>{profileError || orgError?.message}</span>
+              </div>
+            )}
+
+            {currentStatus === 'loading' && (
+              <div className="p-3 bg-neutral-50 border border-neutral-200 text-neutral-600 rounded-xs flex items-center gap-2 font-mono text-xs">
+                <div className="w-3 h-3 border-2 border-neutral-400 border-t-transparent rounded-full animate-spin" />
+                <span>Loading organization details from the server...</span>
               </div>
             )}
 
@@ -289,27 +418,94 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ navigate }) => {
             </div>
 
             <div className="border border-slate-200 rounded-xs overflow-hidden">
+              {membershipsState.listStatus === 'loading' && memberships.length === 0 && (
+                <div className="px-4 py-8 text-center text-xs font-mono text-slate-500">
+                  Loading team members from server…
+                </div>
+              )}
+              {membershipsState.listStatus === 'failed' && membershipsState.error && (
+                <div className="px-4 py-3 bg-red-50 border-b border-red-200 text-xs text-red-700 flex items-center justify-between">
+                  <span>{membershipsState.error.message}</span>
+                  <button
+                    onClick={() => dispatch(fetchMemberships())}
+                    className="font-semibold underline"
+                  >
+                    Retry
+                  </button>
+                </div>
+              )}
               <table className="w-full swiss-table">
                 <thead>
                   <tr>
-                    <th>User / Name</th>
-                    <th>Email Address</th>
-                    <th>Assigned Role</th>
+                    <th>Member</th>
+                    <th>Role</th>
                     <th>Status</th>
+                    <th>Joined</th>
+                    <th className="text-right">Actions</th>
                   </tr>
                 </thead>
                 <tbody>
-                  {users.map((u) => (
-                    <tr key={u.id}>
-                      <td className="font-semibold text-slate-900 text-xs">{u.name}</td>
-                      <td className="text-xs font-mono text-slate-600">{u.email}</td>
+                  {memberships.length === 0 &&
+                    membershipsState.listStatus !== 'loading' && (
+                      <tr>
+                        <td colSpan={5} className="px-4 py-8 text-center text-xs font-mono text-slate-400">
+                          No members found. Invite a team member below.
+                        </td>
+                      </tr>
+                    )}
+                  {memberships.map((m) => (
+                    <tr key={m.id}>
+                      <td className="text-xs font-mono text-slate-600">{m.user_id}</td>
                       <td>
-                        <span className="px-2 py-0.5 text-[10px] font-mono font-bold uppercase bg-slate-900 text-white rounded-xs">
-                          {u.role}
+                        {m.role?.name === 'OWNER' ? (
+                          <span className="px-2 py-0.5 text-[10px] font-mono font-bold uppercase bg-slate-900 text-white rounded-xs">
+                            OWNER
+                          </span>
+                        ) : (
+                          <select
+                            value={m.role?.name ?? ''}
+                            onChange={(e) => void handleRoleChange(m, e.target.value)}
+                            disabled={memberBusyId === m.id}
+                            className="px-2 py-1 text-[10px] font-mono border border-slate-300 rounded-xs bg-white disabled:opacity-50"
+                          >
+                            <option value={m.role?.name ?? ''}>{m.role?.name ?? 'Unknown'}</option>
+                            {roleOptions
+                              .filter((r) => r.name !== m.role?.name)
+                              .map((r) => (
+                                <option key={r.id} value={r.name}>
+                                  {r.name}
+                                </option>
+                              ))}
+                          </select>
+                        )}
+                      </td>
+                      <td>
+                        <span className="px-2 py-0.5 text-[10px] font-mono rounded-xs font-semibold bg-emerald-100 text-emerald-900">
+                          {m.status}
                         </span>
                       </td>
-                      <td className="text-emerald-700 text-xs font-mono font-medium">
-                        Active
+                      <td className="text-xs font-mono text-slate-500">
+                        {m.joined_at ? new Date(m.joined_at).toLocaleDateString() : '—'}
+                      </td>
+                      <td className="text-right whitespace-nowrap">
+                        {m.role?.name !== 'OWNER' && (
+                          <>
+                            <button
+                              onClick={() => void handleTransferOwnership(m)}
+                              disabled={memberBusyId === m.id}
+                              className="text-[11px] font-semibold text-slate-900 hover:underline disabled:opacity-50 mr-3"
+                            >
+                              Make Owner
+                            </button>
+                            <button
+                              onClick={() => void handleRemoveMember(m)}
+                              disabled={memberBusyId === m.id}
+                              className="text-[11px] font-semibold text-red-600 hover:underline disabled:opacity-50"
+                            >
+                              Remove
+                            </button>
+                          </>
+                        )}
                       </td>
                     </tr>
                   ))}
@@ -405,17 +601,11 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ navigate }) => {
             </h3>
 
             <form onSubmit={handleInvite} className="space-y-3">
-              <div>
-                <label className="block font-medium text-slate-700 mb-1">Full Legal Name</label>
-                <input
-                  type="text"
-                  required
-                  placeholder="e.g. S. Venkatraman"
-                  value={inviteName}
-                  onChange={(e) => setInviteName(e.target.value)}
-                  className="w-full px-3 py-2 border border-slate-300 rounded-xs focus:outline-none focus:border-slate-900"
-                />
-              </div>
+              {inviteError && (
+                <div className="p-3 bg-red-50 border border-red-200 text-red-700 rounded-xs">
+                  {inviteError}
+                </div>
+              )}
 
               <div>
                 <label className="block font-medium text-slate-700 mb-1">Email Address</label>
@@ -440,21 +630,26 @@ export const SettingsView: React.FC<SettingsViewProps> = ({ navigate }) => {
                   <option value="Admin">Admin (Full settings, users & accounts)</option>
                   <option value="Viewer">Viewer (Read-only reports access)</option>
                 </select>
+                <p className="mt-1 text-[10px] text-slate-400 font-mono">
+                  Sends a real invitation via POST /memberships/invitations. The member appears
+                  here after they accept.
+                </p>
               </div>
 
               <div className="pt-3 flex items-center justify-end gap-2">
                 <button
                   type="button"
                   onClick={() => setIsInviteModalOpen(false)}
-                  className="px-3 py-2 border border-slate-300 rounded-xs text-slate-700"
+                  className="px-4 py-2 border border-slate-300 rounded-xs text-slate-700"
                 >
                   Cancel
                 </button>
                 <button
                   type="submit"
-                  className="px-4 py-2 bg-slate-950 text-white rounded-xs font-semibold hover:bg-slate-800"
+                  disabled={memberBusyId === 'invite'}
+                  className="px-4 py-2 bg-slate-950 text-white rounded-xs font-semibold hover:bg-slate-800 disabled:opacity-50 disabled:cursor-not-allowed"
                 >
-                  Send Invitation
+                  {memberBusyId === 'invite' ? 'Sending…' : 'Send Invitation'}
                 </button>
               </div>
             </form>

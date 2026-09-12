@@ -1,19 +1,22 @@
 import React, { useState } from 'react';
 import { Lock, Mail, Eye, EyeOff, ArrowRight, ShieldCheck, CheckCircle2 } from 'lucide-react';
-import { useAccounting } from '../../context/AccountingContext';
+import { useAppDispatch, useAppSelector } from '../../app/hooks';
+import { login } from '../../features/auth/authSlice';
 
 interface LoginPageProps {
   navigate: (route: string) => void;
 }
 
 export const LoginPage: React.FC<LoginPageProps> = ({ navigate }) => {
-  const { login } = useAccounting();
+  const dispatch = useAppDispatch();
+  const authStatus = useAppSelector((state) => state.auth.status);
+  const authError = useAppSelector((state) => state.auth.error);
   const [email, setEmail] = useState('');
   const [password, setPassword] = useState('');
   const [showPassword, setShowPassword] = useState(false);
   const [rememberMe, setRememberMe] = useState(true);
   const [error, setError] = useState('');
-  const [loading, setLoading] = useState(false);
+  const loading = authStatus === 'loading';
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -26,29 +29,17 @@ export const LoginPage: React.FC<LoginPageProps> = ({ navigate }) => {
       return;
     }
     setError('');
-    setLoading(true);
 
     try {
-      const res = await login(email, password);
-      if (res.success) {
-        navigate('/dashboard');
-      } else {
-        setError(res.error || 'Invalid credentials.');
-      }
-    } catch {
-      setError('An error occurred during authentication.');
-    } finally {
-      setLoading(false);
+      await dispatch(login({ email, password })).unwrap();
+      navigate('/dashboard');
+    } catch (error) {
+      setError(
+        typeof error === 'object' && error && 'message' in error
+          ? String((error as { message: unknown }).message)
+          : authError?.message || 'Unable to sign in. Please check your credentials.',
+      );
     }
-  };
-
-  const handleDemoLogin = async (demoEmail: string) => {
-    setEmail(demoEmail);
-    setPassword('DemoSecret2026!');
-    setLoading(true);
-    await login(demoEmail);
-    setLoading(false);
-    navigate('/dashboard');
   };
 
   return (
@@ -162,31 +153,6 @@ export const LoginPage: React.FC<LoginPageProps> = ({ navigate }) => {
             )}
           </button>
         </form>
-
-        {/* Quick Demo Logins for Fast Evaluation */}
-        <div className="mt-6 pt-5 border-t border-slate-100">
-          <div className="text-[11px] font-mono text-slate-500 uppercase tracking-wider mb-2.5 text-center">
-            One-Click Demo Roles
-          </div>
-          <div className="grid grid-cols-2 gap-2">
-            <button
-              onClick={() => handleDemoLogin('amaan.sharma@acmeindustries.in')}
-              type="button"
-              className="px-2.5 py-2 border border-slate-200 hover:border-slate-400 text-[11px] font-medium text-slate-800 rounded-xs text-left transition-colors bg-slate-50"
-            >
-              <div className="font-bold">Amaan Sharma</div>
-              <div className="text-[10px] text-slate-500">Owner • Acme Ind.</div>
-            </button>
-            <button
-              onClick={() => handleDemoLogin('ca.mehta@auditindia.in')}
-              type="button"
-              className="px-2.5 py-2 border border-slate-200 hover:border-slate-400 text-[11px] font-medium text-slate-800 rounded-xs text-left transition-colors bg-slate-50"
-            >
-              <div className="font-bold">C.A. Mehta</div>
-              <div className="text-[10px] text-slate-500">Accountant • CA Firm</div>
-            </button>
-          </div>
-        </div>
 
         <div className="mt-6 text-center text-xs text-slate-500">
           New to AI Accounting?{' '}

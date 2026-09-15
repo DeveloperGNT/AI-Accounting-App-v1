@@ -1,5 +1,6 @@
 import { apiClient } from '../lib/axiosInstance';
 import { unwrapApiResponse } from '../api/response';
+import type { AppNotification } from '../types';
 
 // Define types based on backend contract
 export interface Notification {

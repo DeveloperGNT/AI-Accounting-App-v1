@@ -94,14 +94,10 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({ navigate }) => {
     }
   }, [activeOrganizationId, dispatch]);
   // When the Record Expense modal opens, make sure categories are available:
-  // re-use already-loaded Redux data; fetch only when the list has never been
-  // loaded (idle). Failures surface an error + explicit Retry in the dropdown
-  // (no auto-retry loop here).
-  const categoriesAutoFetchedRef = useRef(false);
+  // fetch if idle or failed (e.g. after a temporary server restart).
   useEffect(() => {
     if (!isModalOpen || !activeOrganizationId) return;
-    if (categoriesState.listStatus !== 'idle' || categoriesAutoFetchedRef.current) return;
-    categoriesAutoFetchedRef.current = true;
+    if (categoriesState.listStatus === 'succeeded' || categoriesState.listStatus === 'loading') return;
     dispatch(fetchCategories({ page: 1, limit: 100 }));
   }, [isModalOpen, activeOrganizationId, categoriesState.listStatus, dispatch]);
 

@@ -46,28 +46,14 @@ const mapToAppNotification = (notification: Notification): AppNotification => ({
 export const notificationsApi = {
   // Get all notifications
   async listNotifications(organizationId: string, userId: string): Promise<AppNotification[]> {
-    const response = await apiClient.get(
-      `/organizations/${organizationId}/notifications`,
-      {
-        params: {
-          userId
-        }
-      }
-    );
+    const response = await apiClient.get('/notifications');
     const notifications = unwrapApiResponse<Notification[]>(response.data);
     return notifications.map(mapToAppNotification);
   },
 
   // Get unread count
   async getUnreadCount(organizationId: string, userId: string): Promise<{ count: number }> {
-    const response = await apiClient.get(
-      `/organizations/${organizationId}/notifications/unread-count`,
-      {
-        params: {
-          userId
-        }
-      }
-    );
+    const response = await apiClient.get('/notifications/unread-count');
     return unwrapApiResponse<{ count: number }>(response.data);
   },
 
@@ -77,15 +63,7 @@ export const notificationsApi = {
     userId: string,
     notificationId: string
   ): Promise<AppNotification> {
-    const response = await apiClient.patch(
-      `/organizations/${organizationId}/notifications/${notificationId}/read`,
-      {},
-      {
-        params: {
-          userId
-        }
-      }
-    );
+    const response = await apiClient.patch(`/notifications/${notificationId}/read`);
     const notification = unwrapApiResponse<Notification>(response.data);
     return mapToAppNotification(notification);
   },
@@ -95,15 +73,7 @@ export const notificationsApi = {
     organizationId: string,
     userId: string
   ): Promise<{ count: number }> {
-    const response = await apiClient.patch(
-      `/organizations/${organizationId}/notifications/read-all`,
-      {},
-      {
-        params: {
-          userId
-        }
-      }
-    );
+    const response = await apiClient.patch('/notifications/read-all');
     return unwrapApiResponse<{ count: number }>(response.data);
   },
 
@@ -112,14 +82,7 @@ export const notificationsApi = {
     organizationId: string,
     userId: string
   ): Promise<NotificationPreference[]> {
-    const response = await apiClient.get(
-      `/organizations/${organizationId}/notification-preferences`,
-      {
-        params: {
-          userId
-        }
-      }
-    );
+    const response = await apiClient.get('/notification-preferences');
     return unwrapApiResponse<NotificationPreference[]>(response.data);
   },
 
@@ -131,13 +94,8 @@ export const notificationsApi = {
     preferences: UpdatePreferenceDto
   ): Promise<NotificationPreference> {
     const response = await apiClient.patch(
-      `/organizations/${organizationId}/notification-preferences/${notificationType}`,
-      preferences,
-      {
-        params: {
-          userId
-        }
-      }
+      `/notification-preferences/${notificationType}`,
+      preferences
     );
     return unwrapApiResponse<NotificationPreference>(response.data);
   }

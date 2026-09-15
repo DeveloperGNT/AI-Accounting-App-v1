@@ -61,7 +61,7 @@ const isOverdue = (inv: Invoice) =>
 
 export const SalesView: React.FC<SalesViewProps> = ({ navigate }) => {
   const dispatch = useAppDispatch();
-  const { customers, currentOrg } = useAccounting();
+  const { customers, currentOrg, currentUser } = useAccounting();
   const invoicesState = useAppSelector((state) => state.invoices);
   const paymentsState = useAppSelector((state) => state.payments);
 
@@ -633,7 +633,7 @@ export const SalesView: React.FC<SalesViewProps> = ({ navigate }) => {
           shippingCharges: 0,
           notes: inv.notes || 'Thank you for your business.',
           termsAndConditions: inv.termsAndConditions || '1. Payment within 30 days of invoice date.\n2. Interest @ 18% p.a. on overdue payments.\n3. Subject to Mumbai Jurisdiction.',
-          authorizedSignatory: 'Amaan Sharma',
+          authorizedSignatory: currentUser?.name || 'Authorized Signatory',
           signatoryTitle: 'Authorized Signatory / Finance Director',
         };
 

@@ -152,7 +152,7 @@ export const INITIAL_MOCK_INVOICE: InvoiceFormData = {
     'Goods once sold will not be taken back without prior authorization. Warranty 12 months from delivery.',
   termsAndConditions:
     '1. Payment must be made within 30 days of invoice date.\n2. Interest @ 18% p.a. will be levied on overdue payments.\n3. Subject to Mumbai Jurisdiction only.\n4. Certified that the particulars given above are true and correct.',
-  authorizedSignatory: 'Amaan Sharma',
+  authorizedSignatory: 'Authorized Signatory',
   signatoryTitle: 'Authorized Signatory / Finance Director',
 };
 

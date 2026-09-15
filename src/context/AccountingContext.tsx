@@ -3,7 +3,6 @@ import {
   User,
   Organization,
   Invoice,
-  PurchaseBill,
   Transaction,
   Expense,
   Customer,
@@ -20,8 +19,6 @@ import {
 } from '../types';
 import {
   INITIAL_ORGANIZATIONS,
-  INITIAL_PURCHASE_BILLS,
-  INITIAL_EXPENSES,
   INITIAL_TRANSACTIONS,
   INITIAL_BANK_ACCOUNTS,
   INITIAL_BANK_FEEDS,
@@ -29,10 +26,17 @@ import {
   INITIAL_REVIEW_ITEMS,
   INITIAL_AI_INSIGHTS,
   INITIAL_AUDIT_LOGS,
-  INITIAL_NOTIFICATIONS,
   SAMPLE_DOCUMENTS
 } from '../data/mockData';
 import { useAppDispatch, useAppSelector } from '../app/hooks';
+import {
+  fetchNotifications,
+  fetchUnreadCount,
+  markNotificationRead,
+  markAllNotificationsRead,
+  fetchNotificationPreferences,
+  updateNotificationPreference
+} from '../features/notifications/notificationsSlice';
 import {
   createOrganization as createOrganizationThunk,
   selectOrganization as selectOrganizationAction,
@@ -44,15 +48,23 @@ import {
 } from '../features/organizations/orgMappers';
 import { fetchCustomers as fetchCustomersThunk } from '../features/customers/customersSlice';
 import { fetchVendors as fetchVendorsThunk } from '../features/vendors/vendorsSlice';
+import { fetchCategories as fetchCategoriesThunk } from '../features/categories/categoriesSlice';
 import {
   fetchInvoices as fetchInvoicesThunk,
 } from '../features/invoices/invoicesSlice';
+import { fetchExpenses as fetchExpensesThunk } from '../features/expenses/expensesSlice';
 import {
   toUiInvoice,
   toCreateInvoiceRequest,
 } from '../features/invoices/invoiceMappers';
+import {
+  selectCurrentUser,
+  selectIsAuthenticated,
+  selectIsInitializing,
+} from '../features/auth/authSlice';
 import type { Customer as ApiCustomer } from '../api/customersTypes';
 import type { Vendor as ApiVendor } from '../api/vendorsTypes';
+import type { Expense as ApiExpense } from '../api/expensesTypes';
 import type { UpdateOrganizationRequest } from '../api/types';
 
 // Map an API customer record onto the legacy UI Customer shape used by the
@@ -99,6 +111,52 @@ const toUiVendor = (v: ApiVendor): Vendor => ({
   paymentTermsDays: v.paymentTermsDays ?? 30,
 });
 
+// Map a backend expense onto the legacy UI Expense shape still consumed by
+// DashboardView / ReportsView / GlobalSearchModal. The backend loads the
+// `items` relation but does NOT hydrate a `category` or `vendor` relation, so
+// the category/vendor display names are resolved from the categories/vendors
+// slices (passed in as lookups). `findAll`/`findOne` also leave the vendor
+// name/GSTIN snapshots empty at create time.
+const toUiExpenseStatus = (status: ApiExpense['status']): Expense['status'] => {
+  switch (status) {
+    case 'APPROVED':
+      return 'Approved';
+    case 'POSTED':
+      return 'Paid';
+    case 'REJECTED':
+    case 'CANCELLED':
+    case 'REVERSED':
+      return 'Needs Review';
+    case 'DRAFT':
+    case 'SUBMITTED':
+    default:
+      return 'Pending';
+  }
+};
+
+const toUiExpense = (
+  exp: ApiExpense,
+  categoryNameById: Map<string, string>,
+  vendorById: Map<string, Vendor>,
+): Expense => {
+  const vendor = exp.vendorId ? vendorById.get(exp.vendorId) : undefined;
+  return {
+    id: exp.id,
+    orgId: exp.organizationId,
+    date: exp.expenseDate,
+    category: (categoryNameById.get(exp.categoryId) || 'Miscellaneous') as Expense['category'],
+    vendorName: exp.vendorNameSnapshot || vendor?.name,
+    vendorGstin: exp.vendorGstinSnapshot || vendor?.gstin || '',
+    description: exp.items?.[0]?.description || '',
+    amount: Number(exp.grandTotal),
+    taxableAmount: Number(exp.subtotal),
+    gstAmount: Number(exp.taxTotal),
+    gstRate: Number(exp.items?.[0]?.taxRate ?? 0),
+    tdsDeducted: exp.tdsAmount != null ? Number(exp.tdsAmount) : undefined,
+    status: toUiExpenseStatus(exp.status),
+  };
+};
+
 export interface CreateOrganizationParams extends Omit<Organization, 'id' | 'createdAt' | 'userRole'> {
   bankName?: string;
   accountType?: string;
@@ -121,7 +179,6 @@ interface AccountingContextType {
 
   // Accounting Records State
   invoices: Invoice[];
-  purchaseBills: PurchaseBill[];
   transactions: Transaction[];
   expenses: Expense[];
   customers: Customer[];
@@ -133,18 +190,14 @@ interface AccountingContextType {
   insights: AIInsight[];
   auditLogs: AuditLogEntry[];
   notifications: AppNotification[];
+  unreadCount: number;
   documents: DocumentExtraction[];
 
   // NOTE: no invoice mutations here — SalesView and InvoiceCreationFlow use
   // the invoicesSlice thunks directly (create/finalize/cancel/update/delete),
   // so every invoice operation flows through dispatch().
 
-  addPurchaseBill: (bill: Omit<PurchaseBill, 'id' | 'orgId'>) => PurchaseBill;
-  updatePurchaseBillStatus: (id: string, status: PurchaseBill['status']) => void;
-  deletePurchaseBill: (id: string) => void;
-
   addTransaction: (transaction: Omit<Transaction, 'id' | 'orgId'>) => Transaction;
-  addExpense: (expense: Omit<Expense, 'id' | 'orgId'>) => Expense;
 
   reconcileBankFeed: (feedId: string, action: 'Matched' | 'Ignored') => void;
   reconcileStatementLine: (lineId: string, matchedTxId?: string) => void;
@@ -175,21 +228,18 @@ const AccountingContext = createContext<AccountingContextType | undefined>(undef
 const STORAGE_KEYS = {
   CURRENT_ORG_ID: 'ai_acc_current_org_id',
   ORGS: 'ai_acc_orgs',
-  PURCHASE_BILLS: 'ai_acc_purchase_bills',
   TRANSACTIONS: 'ai_acc_transactions',
-  EXPENSES: 'ai_acc_expenses',
   BANK_ACCOUNTS: 'ai_acc_banks',
   BANK_FEEDS: 'ai_acc_feeds',
   BANK_STMT_LINES: 'ai_acc_stmt_lines',
   REVIEW_ITEMS: 'ai_acc_review',
   AUDIT_LOGS: 'ai_acc_audit',
-  NOTIFICATIONS: 'ai_acc_notifs',
   DOCUMENTS: 'ai_acc_docs',
 };
 
 export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
   // Authentication is owned by Redux/Supabase; this remains for existing business display/audit consumers.
-  const [currentUser] = useState<User | null>(null);
+  const currentUser = useAppSelector(selectCurrentUser);
 
   const dispatch = useAppDispatch();
   // Real backend organization state (Redux). Falls back to mock data only
@@ -256,19 +306,61 @@ export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     [invoicesState.items],
   );
 
-  const [purchaseBills, setPurchaseBills] = useState<PurchaseBill[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.PURCHASE_BILLS);
-    return saved ? JSON.parse(saved) : INITIAL_PURCHASE_BILLS;
-  });
+  // Expenses come from the backend via the expenses Redux slice
+  // (GET /api/v1/expenses). Like invoices, the fetch must wait for an active
+  // organization (TenantAccessGuard rejects headerless requests) and re-runs
+  // when the tenant switches. Category + vendor display names are resolved
+  // from the categories/vendors slices because the backend only returns ids.
+  const expensesState = useAppSelector((state) => state.expenses);
+  const categoriesState = useAppSelector((state) => state.categories);
+
+  useEffect(() => {
+    if (activeOrganizationId) {
+      void dispatch(fetchCategoriesThunk({ page: 1, limit: 100 }));
+    }
+  }, [activeOrganizationId, dispatch]);
+
+  useEffect(() => {
+    if (activeOrganizationId) {
+      void dispatch(fetchExpensesThunk());
+    }
+  }, [activeOrganizationId, dispatch]);
+
+  // Fetch notifications when organization changes
+  useEffect(() => {
+    if (activeOrganizationId && currentUser) {
+      void dispatch(fetchNotifications({ organizationId: activeOrganizationId, userId: currentUser.id }));
+      void dispatch(fetchUnreadCount({ organizationId: activeOrganizationId, userId: currentUser.id }));
+    }
+  }, [activeOrganizationId, currentUser, dispatch]);
+
+  const categoryNameById = useMemo(() => {
+    const map = new Map<string, string>();
+    categoriesState.list.forEach((c) => map.set(c.id, c.name));
+    return map;
+  }, [categoriesState.list]);
+
+  const vendorById = useMemo(() => {
+    const map = new Map<string, Vendor>();
+    vendors.forEach((v) => map.set(v.id, v));
+    return map;
+  }, [vendors]);
+
+  const expenses = useMemo<Expense[]>(
+    () => expensesState.items.map((e) => toUiExpense(e, categoryNameById, vendorById)),
+    [expensesState.items, categoryNameById, vendorById],
+  );
+
+  // Purchase bills are backend-owned (GET /bills). The provider only reads
+  // their ITC totals for the shared GST input-credit metric; the bills
+  // themselves are rendered by PurchasesView directly from the purchases slice.
+  const purchasesState = useAppSelector((state) => state.purchases);
+  const notificationsState = useAppSelector((state) => state.notifications);
+  const unreadCountState = useAppSelector((state) => state.notifications.unreadCount);
 
   const [transactions, setTransactions] = useState<Transaction[]>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.TRANSACTIONS);
     return saved ? JSON.parse(saved) : INITIAL_TRANSACTIONS;
-  });
-
-  const [expenses, setExpenses] = useState<Expense[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.EXPENSES);
-    return saved ? JSON.parse(saved) : INITIAL_EXPENSES;
   });
 
   const [bankAccounts, setBankAccounts] = useState<BankAccount[]>(() => {
@@ -298,11 +390,7 @@ export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     return saved ? JSON.parse(saved) : INITIAL_AUDIT_LOGS;
   });
 
-  const [notifications, setNotifications] = useState<AppNotification[]>(() => {
-    const saved = localStorage.getItem(STORAGE_KEYS.NOTIFICATIONS);
-    return saved ? JSON.parse(saved) : INITIAL_NOTIFICATIONS;
-  });
-
+  
   const [documents, setDocuments] = useState<DocumentExtraction[]>(() => {
     const saved = localStorage.getItem(STORAGE_KEYS.DOCUMENTS);
     return saved ? JSON.parse(saved) : SAMPLE_DOCUMENTS;
@@ -311,16 +399,8 @@ export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   // Save changes to localStorage for persistence. Invoices are backend-
   // owned now and no longer persisted locally.
   useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.PURCHASE_BILLS, JSON.stringify(purchaseBills));
-  }, [purchaseBills]);
-
-  useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.TRANSACTIONS, JSON.stringify(transactions));
   }, [transactions]);
-
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.EXPENSES, JSON.stringify(expenses));
-  }, [expenses]);
 
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.BANK_ACCOUNTS, JSON.stringify(bankAccounts));
@@ -342,10 +422,7 @@ export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     localStorage.setItem(STORAGE_KEYS.AUDIT_LOGS, JSON.stringify(auditLogs));
   }, [auditLogs]);
 
-  useEffect(() => {
-    localStorage.setItem(STORAGE_KEYS.NOTIFICATIONS, JSON.stringify(notifications));
-  }, [notifications]);
-
+  
   useEffect(() => {
     localStorage.setItem(STORAGE_KEYS.DOCUMENTS, JSON.stringify(documents));
   }, [documents]);
@@ -353,10 +430,10 @@ export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   const addAuditEntry = (action: string, module: string, recordRef: string) => {
     const newEntry: AuditLogEntry = {
       id: `aud_${Date.now()}`,
-      orgId: currentOrg?.id || 'org_acme',
+      orgId: currentOrg?.id || '',
       timestamp: new Date().toISOString(),
-      user: currentUser?.name || 'Authorized User',
-      userEmail: currentUser?.email || 'user@example.in',
+      user: currentUser?.name || '',
+      userEmail: currentUser?.email || '',
       action,
       module,
       recordRef,
@@ -412,50 +489,6 @@ export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
 
 
 
-  // Purchase Bills Mutations
-  const addPurchaseBill = (billData: Omit<PurchaseBill, 'id' | 'orgId'>): PurchaseBill => {
-    const newBill: PurchaseBill = {
-      ...billData,
-      id: `bill_${Date.now()}`,
-      orgId: currentOrg?.id || 'org_acme',
-    };
-    setPurchaseBills((prev) => [newBill, ...prev]);
-
-    const newTx: Transaction = {
-      id: `tx_${Date.now()}`,
-      orgId: currentOrg?.id || 'org_acme',
-      date: newBill.date,
-      description: `Inward Purchase Bill #${newBill.billNumber}`,
-      type: 'Purchase',
-      partyName: newBill.vendorName,
-      partyType: 'Vendor',
-      partyGstin: newBill.vendorGstin,
-      amount: newBill.totalAmount,
-      taxableAmount: newBill.taxableAmount,
-      gstAmount: newBill.cgst + newBill.sgst + newBill.igst,
-      gstRate: 18,
-      status: newBill.status === 'Paid' ? 'Paid' : 'Categorized',
-      account: 'HDFC Current A/c (0060)',
-      referenceNo: newBill.billNumber,
-    };
-    setTransactions((prev) => [newTx, ...prev]);
-
-    addAuditEntry('Created Inward Bill', 'Purchases', `${newBill.billNumber} (${newBill.vendorName})`);
-    return newBill;
-  };
-
-  const updatePurchaseBillStatus = (id: string, status: PurchaseBill['status']) => {
-    setPurchaseBills((prev) =>
-      prev.map((b) => (b.id === id ? { ...b, status } : b))
-    );
-    addAuditEntry('Updated Bill Status', 'Purchases', `Bill #${id} set to ${status}`);
-  };
-
-  const deletePurchaseBill = (id: string) => {
-    setPurchaseBills((prev) => prev.filter((b) => b.id !== id));
-    addAuditEntry('Deleted Bill', 'Purchases', `Bill #${id}`);
-  };
-
   const addTransaction = (txData: Omit<Transaction, 'id' | 'orgId'>): Transaction => {
     const newTx: Transaction = {
       ...txData,
@@ -465,37 +498,6 @@ export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     setTransactions((prev) => [newTx, ...prev]);
     addAuditEntry('Recorded Transaction', 'Transactions', `${newTx.type}: ${newTx.description}`);
     return newTx;
-  };
-
-  const addExpense = (expData: Omit<Expense, 'id' | 'orgId'>): Expense => {
-    const newExp: Expense = {
-      ...expData,
-      id: `exp_${Date.now()}`,
-      orgId: currentOrg?.id || 'org_acme',
-    };
-    setExpenses((prev) => [newExp, ...prev]);
-
-    const newTx: Transaction = {
-      id: `tx_${Date.now()}`,
-      orgId: currentOrg?.id || 'org_acme',
-      date: newExp.date,
-      description: newExp.description,
-      type: 'Expense',
-      partyName: newExp.vendorName || 'Direct Expense',
-      partyType: 'Vendor',
-      partyGstin: newExp.vendorGstin,
-      amount: newExp.amount,
-      taxableAmount: newExp.taxableAmount,
-      gstAmount: newExp.gstAmount,
-      gstRate: newExp.gstRate,
-      status: 'Categorized',
-      account: newExp.account || 'HDFC Current A/c (0060)',
-      referenceNo: newExp.referenceNo,
-    };
-    setTransactions((prev) => [newTx, ...prev]);
-
-    addAuditEntry('Created Expense Entry', 'Expenses', `${newExp.category} - ${newExp.vendorName || 'Direct'}`);
-    return newExp;
   };
 
   const reconcileBankFeed = (feedId: string, action: 'Matched' | 'Ignored') => {
@@ -538,41 +540,41 @@ export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
       prev.map((d) => (d.id === docId ? { ...d, status: action } : d))
     );
 
-    if (action === 'Approved' && doc.extractedData) {
-      addExpense({
-        date: doc.extractedData.date,
-        category: 'Office Supplies',
-        vendorName: doc.extractedData.vendorName,
-        vendorGstin: doc.extractedData.gstin,
-        description: `Imported via AI OCR from ${doc.fileName} (#${doc.extractedData.invoiceNumber})`,
-        amount: doc.extractedData.totalAmount,
-        taxableAmount: doc.extractedData.taxableAmount,
-        gstAmount: doc.extractedData.cgst + doc.extractedData.sgst + doc.extractedData.igst,
-        gstRate: 18,
-        paymentMethod: 'Bank Transfer',
-        status: 'Approved',
-        referenceNo: doc.extractedData.invoiceNumber,
-      });
-    }
+    // NOTE: the old mock flow also created a local expense via addExpense()
+    // here. Expenses are backend-owned now (GET/POST /api/v1/expenses), so
+    // the OCR document-approval mock no longer fabricates expense records.
 
     addAuditEntry('Document OCR Action', 'AI Assistant', `${action} extracted document: ${doc.fileName}`);
   };
 
   const markNotificationRead = (id: string) => {
-    setNotifications((prev) =>
-      prev.map((n) => (n.id === id ? { ...n, read: true } : n))
-    );
+    // Dispatch the mark notification as read thunk
+    // Note: We need organizationId and userId for the thunk
+    // For now, we'll get them from Redux state or fallback to defaults
+    // In a real implementation, these would come from the current context
+    const userId = currentUser?.id || 'user_placeholder';
+    const orgId = activeOrganizationId || 'org_placeholder';
+    if (userId && orgId) {
+      dispatch(markNotificationRead({ organizationId: orgId, userId: userId, notificationId: id }));
+    }
   };
 
   const markAllNotificationsRead = () => {
-    setNotifications((prev) => prev.map((n) => ({ ...n, read: true })));
+    // Dispatch the mark all notifications as read thunk
+    // Note: We need organizationId and userId for the thunk
+    // For now, we'll get them from Redux state or fallback to defaults
+    // In a real implementation, these would come from the current context
+    const userId = currentUser?.id || 'user_placeholder';
+    const orgId = activeOrganizationId || 'org_placeholder';
+    if (userId && orgId) {
+      dispatch(markAllNotificationsRead({ organizationId: orgId, userId: userId }));
+    }
   };
 
   // Tenant Scoped Data Slices
   const activeOrgId = currentOrg?.id || 'unassigned';
 
   const orgInvoices = invoices.filter((i) => (i.orgId || 'org_acme') === activeOrgId);
-  const orgPurchaseBills = purchaseBills.filter((b) => (b.orgId || 'org_acme') === activeOrgId);
   const orgTransactions = transactions.filter((t) => (t.orgId || 'org_acme') === activeOrgId);
   const orgExpenses = expenses.filter((e) => (e.orgId || 'org_acme') === activeOrgId);
   const orgCustomers = customers.filter((c) => (c.orgId || 'org_acme') === activeOrgId);
@@ -583,7 +585,7 @@ export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
   const orgReviewItems = reviewItems.filter((r) => (r.orgId || 'org_acme') === activeOrgId);
   const orgInsights = insights.filter((i) => (i.orgId || 'org_acme') === activeOrgId);
   const orgAuditLogs = auditLogs.filter((a) => (a.orgId || 'org_acme') === activeOrgId);
-  const orgNotifications = notifications.filter((n) => (n.orgId || 'org_acme') === activeOrgId || !n.orgId);
+  const orgNotifications = notificationsState.items.filter((n) => (n.orgId || 'org_acme') === activeOrgId || !n.orgId);
   const orgDocuments = documents.filter((d: any) => !d.orgId || d.orgId === activeOrgId);
 
   // Financial Metrics Computation per Organization
@@ -600,7 +602,7 @@ export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
 
   // GST Breakdown
   const gstOutputLiability = orgInvoices.reduce((sum, i) => sum + (i.cgst + i.sgst + i.igst), 0);
-  const gstInputCredit = orgExpenses.reduce((sum, e) => sum + e.gstAmount, 0) + orgPurchaseBills.filter(p => p.itcEligible).reduce((sum, p) => sum + (p.cgst + p.sgst + p.igst), 0);
+  const gstInputCredit = orgExpenses.reduce((sum, e) => sum + e.gstAmount, 0) + purchasesState.items.reduce((sum, p) => sum + Number(p.itcClaimedAmount), 0);
   const gstNetPayable = Math.max(0, gstOutputLiability - gstInputCredit);
 
   const overdueInvoicesCount = orgInvoices.filter((i) => i.status === 'Overdue').length;
@@ -617,7 +619,6 @@ export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         updateOrganization,
 
         invoices: orgInvoices,
-        purchaseBills: orgPurchaseBills,
         transactions: orgTransactions,
         expenses: orgExpenses,
         customers: orgCustomers,
@@ -629,13 +630,10 @@ export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
         insights: orgInsights.length > 0 ? orgInsights : insights,
         auditLogs: orgAuditLogs,
         notifications: orgNotifications,
+        unreadCount: unreadCountState,
         documents: orgDocuments,
 
-        addPurchaseBill,
-        updatePurchaseBillStatus,
-        deletePurchaseBill,
         addTransaction,
-        addExpense,
         reconcileBankFeed,
         reconcileStatementLine,
         handleReviewItem,

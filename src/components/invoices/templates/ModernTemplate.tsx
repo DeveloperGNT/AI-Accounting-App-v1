@@ -278,7 +278,7 @@ export const ModernTemplate: React.FC<TemplateProps> = ({ data, calculations }) 
             {business.name}
           </div>
           <div className="border-t border-neutral-300 pt-1 w-44 text-center">
-            <div className="font-semibold text-neutral-900 text-xs font-mono">{data.authorizedSignatory || 'Amaan Sharma'}</div>
+            <div className="font-semibold text-neutral-900 text-xs font-mono">{data.authorizedSignatory || ''}</div>
             <div className="text-[9px] text-neutral-500">{data.signatoryTitle || 'Authorized Signatory'}</div>
           </div>
         </div>

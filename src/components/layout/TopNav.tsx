@@ -55,7 +55,7 @@ export const TopNav: React.FC<TopNavProps> = ({
     [userProfile?.first_name, userProfile?.last_name].filter(Boolean).join(' ') ||
     (authUser?.profile?.display_name as string | undefined) ||
     currentUser?.name ||
-    'Amaan Sharma';
+    '';
   const profileEmail = authUser?.email || currentUser?.email;
   const profileRole = authUser?.memberships[0]?.role_name || currentUser?.role || 'Owner';
   const profileAvatar = profileName

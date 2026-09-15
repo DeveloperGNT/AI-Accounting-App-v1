@@ -3,17 +3,17 @@ import {
   Plus,
   Search,
   ScanLine,
-  FileCheck2,
   AlertCircle,
   Eye,
   X,
-  UploadCloud,
   CheckCircle2,
   Trash2,
   Banknote,
   Ban,
   RefreshCw,
-  Loader2
+  Loader2,
+  ShieldCheck,
+  FileText,
 } from 'lucide-react';
 import { useAccounting } from '../../context/AccountingContext';
 import { useAppDispatch, useAppSelector } from '../../app/hooks';
@@ -24,37 +24,59 @@ import {
   postVendorPayment,
   voidVendorPayment,
 } from '../../features/vendorPayments/vendorPaymentsSlice';
+import {
+  fetchBills,
+  fetchBillById,
+  createBill,
+  updateBill,
+  deleteBill,
+  finalizeBill,
+  cancelBill,
+} from '../../features/purchases/purchasesSlice';
 import { fetchAccounts } from '../../features/accounts/accountsSlice';
 import { VendorPaymentStatus } from '../../api/vendorPaymentsTypes';
 import type { VendorPayment } from '../../api/vendorPaymentsTypes';
+import type { PurchaseBill } from '../../api/purchasesTypes';
 import { getApiErrorMessage } from '../../utils/apiErrorMessage';
 import { formatINR, formatDate } from '../../utils/formatters';
-import { PurchaseBill, PurchaseBillStatus } from '../../types';
 
 interface PurchasesViewProps {
   navigate: (route: string) => void;
 }
 
+const BILL_STATUS_TABS = ['All', 'DRAFT', 'FINALIZED', 'CANCELLED', 'PAID', 'PARTIALLY_PAID'];
+
 export const PurchasesView: React.FC<PurchasesViewProps> = ({ navigate }) => {
-  const { purchaseBills, vendors, addPurchaseBill, updatePurchaseBillStatus, currentOrg } = useAccounting();
+  // Vendors still come from AccountingContext (which maps the vendors Redux
+  // slice onto the legacy UI shape); they are real backend data, not mock.
+  const { vendors } = useAccounting();
   const dispatch = useAppDispatch();
   const vpState = useAppSelector((state) => state.vendorPayments);
   const accountsState = useAppSelector((state) => state.accounts);
+  const billsState = useAppSelector((state) => state.purchases);
   const activeOrganizationId = useAppSelector(
     (state) => state.organizations.activeOrganizationId,
   );
 
   const [searchQuery, setSearchQuery] = useState('');
   const [statusFilter, setStatusFilter] = useState<string>('All');
-  const [selectedBill, setSelectedBill] = useState<PurchaseBill | null>(null);
   const [isRecordModalOpen, setIsRecordModalOpen] = useState(false);
   const [isOcrScanning, setIsOcrScanning] = useState(false);
-  const [isSubmittingBill, setIsSubmittingBill] = useState(false);
+
+  // ────────────────────────────────────────────────────────────────
+  // PURCHASE BILLS — real backend module (GET/POST/PATCH/DELETE
+  // /api/v1/bills + finalize/cancel). The list loads on mount / tenant
+  // switch / refresh; every mutation goes through the purchasesSlice
+  // thunks via dispatch().
+  // ────────────────────────────────────────────────────────────────
+  const [billRefresh, setBillRefresh] = useState(0);
+  const [billError, setBillError] = useState('');
+  const [billSuccess, setBillSuccess] = useState('');
+  const [billBusy, setBillBusy] = useState<string | null>(null);
+  const [selectedBillId, setSelectedBillId] = useState<string | null>(null);
 
   // ────────────────────────────────────────────────────────────────
   // VENDOR PAYMENTS — real backend module (GET/POST /vendor-payments).
-  // The list loads on mount / tenant switch / refresh; mutations go through
-  // the vendorPaymentsSlice thunks via dispatch().
   // ────────────────────────────────────────────────────────────────
   const [vpRefresh, setVpRefresh] = useState(0);
   const [vpError, setVpError] = useState('');
@@ -74,9 +96,23 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ navigate }) => {
 
   useEffect(() => {
     if (activeOrganizationId) {
+      dispatch(fetchBills());
+    }
+  }, [activeOrganizationId, billRefresh, dispatch]);
+
+  useEffect(() => {
+    if (activeOrganizationId) {
       dispatch(fetchVendorPayments());
     }
   }, [activeOrganizationId, vpRefresh, dispatch]);
+
+  // "View bill" → GET /bills/:id to refresh status/items; the fulfilled case
+  // upserts into the list so the drawer re-renders with fresh data.
+  useEffect(() => {
+    if (selectedBillId) {
+      dispatch(fetchBillById(selectedBillId));
+    }
+  }, [selectedBillId, dispatch]);
 
   // Accounts feed the "pay from" picker in the post action; fetched once.
   useEffect(() => {
@@ -91,8 +127,17 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ navigate }) => {
     return map;
   }, [vendors]);
 
+  const vendorLabel = (b: PurchaseBill) =>
+    b.vendorNameSnapshot || b.vendor?.name || vendorNameById.get(b.vendorId) || '—';
+  const vendorGstinLabel = (b: PurchaseBill) =>
+    b.vendorGstinSnapshot || b.vendor?.gstin || '';
+
   const selectedVp: VendorPayment | null = selectedVpId
     ? vpState.items.find((p) => p.id === selectedVpId) ?? null
+    : null;
+
+  const selectedBill: PurchaseBill | null = selectedBillId
+    ? billsState.items.find((b) => b.id === selectedBillId) ?? null
     : null;
 
   const openPayModal = () => {
@@ -171,14 +216,65 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ navigate }) => {
     }
   };
 
+  // ────────────────────────────────────────────────────────────────
+  // PURCHASE BILLS — lifecycle actions (backend status rules).
+  // Only DRAFT bills can be updated/finalized/deleted; only FINALIZED
+  // bills can be cancelled (and not PAID/PARTIALLY_PAID).
+  // ────────────────────────────────────────────────────────────────
+  const runBillAction = async (label: string, action: () => Promise<unknown>, onDone?: () => void) => {
+    setBillBusy(label);
+    setBillError('');
+    try {
+      await action();
+      onDone?.();
+    } catch (err) {
+      setBillError(getApiErrorMessage(err, `Failed to ${label.toLowerCase()} the purchase bill.`));
+    } finally {
+      setBillBusy(null);
+    }
+  };
+
+  const handleFinalizeBill = (bill: PurchaseBill) =>
+    runBillAction('Finalize', () => dispatch(finalizeBill(bill.id)).unwrap());
+
+  const handleCancelBill = (bill: PurchaseBill) => {
+    if (!window.confirm(`Cancel purchase bill ${bill.billNumber}? Its posted journal entry will be reversed.`)) return;
+    void runBillAction('Cancel', () => dispatch(cancelBill(bill.id)).unwrap());
+  };
+
+  const handleDeleteDraft = (bill: PurchaseBill) => {
+    if (!window.confirm(`Delete draft ${bill.billNumber}? This cannot be undone.`)) return;
+    void runBillAction('Delete', async () => {
+      await dispatch(deleteBill(bill.id)).unwrap();
+      setSelectedBillId(null);
+    });
+  };
+
+  const handleEditNotes = (bill: PurchaseBill) => {
+    const input = window.prompt('Update draft notes', bill.notes || '');
+    if (input === null) return;
+    void runBillAction('Update', () =>
+      dispatch(updateBill({ id: bill.id, payload: { notes: input || undefined } })).unwrap(),
+    );
+  };
+
   // New Purchase Bill form
-  const [billNumber, setBillNumber] = useState('BL-9921');
+  const [billNumber, setBillNumber] = useState('');
   const [selectedVendorId, setSelectedVendorId] = useState(vendors[0]?.id || '');
-  const [date, setDate] = useState('2026-08-07');
-  const [dueDate, setDueDate] = useState('2026-09-06');
-  const [taxableAmount, setTaxableAmount] = useState('45000');
+  const [date, setDate] = useState(new Date().toISOString().slice(0, 10));
+  const [dueDate, setDueDate] = useState('');
+  const [taxableAmount, setTaxableAmount] = useState('');
   const [gstRate, setGstRate] = useState('18');
   const [itcEligible, setItcEligible] = useState(true);
+
+  const openBillModal = () => {
+    if (!selectedVendorId && vendors.length > 0) {
+      setSelectedVendorId(vendors[0].id);
+    }
+    setBillError('');
+    setBillSuccess('');
+    setIsRecordModalOpen(true);
+  };
 
   // Simulated OCR autofill demo
   const handleSimulateOcr = () => {
@@ -197,76 +293,86 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ navigate }) => {
     }, 900);
   };
 
-  const handleCreateBill = (e: React.FormEvent) => {
+  const handleCreateBill = async (e: React.FormEvent) => {
     e.preventDefault();
-    if (isSubmittingBill) return;
-    setIsSubmittingBill(true);
+    if (billBusy) return;
+    if (!selectedVendorId) {
+      setBillError('Select a supplier / vendor before saving the bill.');
+      return;
+    }
+    const taxable = parseFloat(taxableAmount);
+    if (!taxable || taxable <= 0) {
+      setBillError('Enter a taxable material cost greater than zero.');
+      return;
+    }
+    const rate = parseFloat(gstRate) || 0;
 
-    setTimeout(() => {
-      const vendor = vendors.find((v) => v.id === selectedVendorId) || vendors[0];
-      const taxable = parseFloat(taxableAmount) || 0;
-      const rate = parseFloat(gstRate) || 0;
-      const totalGst = (taxable * rate) / 100;
-      const cgst = Math.round(totalGst / 2);
-      const sgst = Math.round(totalGst / 2);
-      const totalAmount = taxable + totalGst;
-
-      addPurchaseBill({
-        billNumber,
-        vendorId: vendor.id,
-        vendorName: vendor.name,
-        vendorGstin: vendor.gstin,
-        date,
-        dueDate,
-        items: [
-          {
-            id: `p_item_${Date.now()}`,
-            description: 'Industrial Inward Material Purchase',
-            hsn: '7208',
-            quantity: 1,
-            unit: 'SET',
-            rate: taxable,
-            discountPct: 0,
-            gstRate: rate,
-            amount: taxable,
-            cgst,
-            sgst,
-            igst: 0,
-          },
-        ],
-        taxableAmount: taxable,
-        cgst,
-        sgst,
-        igst: 0,
-        totalAmount,
-        amountPaid: 0,
-        status: 'Received',
-        itcEligible,
-      });
-
-      setIsSubmittingBill(false);
+    setBillBusy('create');
+    setBillError('');
+    try {
+      await dispatch(
+        createBill({
+          vendorId: selectedVendorId,
+          vendorInvoiceNumber: billNumber.trim() ? billNumber.trim() : undefined,
+          billDate: date,
+          dueDate: dueDate || undefined,
+          itcEligible,
+          items: [
+            {
+              description: 'Industrial Inward Material Purchase',
+              hsn: '7208',
+              quantity: 1,
+              unitPrice: taxable,
+              taxRate: rate,
+              itcEligible,
+            },
+          ],
+        }),
+      ).unwrap();
       setIsRecordModalOpen(false);
-      setBillNumber(`BL-${Math.floor(1000 + Math.random() * 9000)}`);
-    }, 450);
+      setBillSuccess('Purchase bill saved as DRAFT.');
+      setBillNumber('');
+      setTaxableAmount('');
+    } catch (err) {
+      setBillError(getApiErrorMessage(err, 'Failed to create the purchase bill.'));
+    } finally {
+      setBillBusy(null);
+    }
   };
 
-  const totalPurchases = purchaseBills.reduce((sum, b) => sum + b.totalAmount, 0);
-  const totalItc = purchaseBills
-    .filter((b) => b.itcEligible)
-    .reduce((sum, b) => sum + b.cgst + b.sgst + b.igst, 0);
+  const totalPurchases = billsState.items.reduce((sum, b) => sum + Number(b.grandTotal), 0);
+  const totalItc = billsState.items.reduce((sum, b) => sum + Number(b.itcClaimedAmount), 0);
+  const openPayables = billsState.items
+    .filter((b) => b.status === 'FINALIZED')
+    .reduce((sum, b) => sum + Number(b.grandTotal), 0);
 
-  const filteredBills = purchaseBills.filter((b) => {
+  const filteredBills = billsState.items.filter((b) => {
     if (statusFilter !== 'All' && b.status !== statusFilter) return false;
     if (searchQuery.trim()) {
       const q = searchQuery.toLowerCase();
       return (
         b.billNumber.toLowerCase().includes(q) ||
-        b.vendorName.toLowerCase().includes(q) ||
-        b.vendorGstin.toLowerCase().includes(q)
+        (b.vendorInvoiceNumber || '').toLowerCase().includes(q) ||
+        vendorLabel(b).toLowerCase().includes(q) ||
+        vendorGstinLabel(b).toLowerCase().includes(q)
       );
     }
     return true;
   });
+
+  const billStatusBadgeClass = (status: PurchaseBill['status']) => {
+    switch (status) {
+      case 'FINALIZED':
+      case 'PAID':
+        return 'bg-emerald-100 text-emerald-900';
+      case 'PARTIALLY_PAID':
+        return 'bg-amber-100 text-amber-900';
+      case 'CANCELLED':
+        return 'bg-red-100 text-red-900';
+      default:
+        return 'bg-slate-100 text-slate-700';
+    }
+  };
 
   return (
     <div className="space-y-6">
@@ -284,7 +390,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ navigate }) => {
         <div className="flex items-center gap-2">
           <button
             onClick={() => {
-              setIsRecordModalOpen(true);
+              openBillModal();
               handleSimulateOcr();
             }}
             className="bg-white border border-slate-300 hover:bg-slate-50 text-slate-800 text-xs font-semibold px-3.5 py-2 rounded-xs flex items-center gap-1.5 transition-colors"
@@ -301,7 +407,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ navigate }) => {
             <span>Pay Vendor</span>
           </button>
           <button
-            onClick={() => setIsRecordModalOpen(true)}
+            onClick={openBillModal}
             id="record-vendor-bill-btn"
             className="bg-slate-950 hover:bg-slate-800 text-white text-xs font-semibold px-4 py-2 rounded-xs flex items-center gap-2 transition-colors"
           >
@@ -432,7 +538,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ navigate }) => {
             {formatINR(totalPurchases, false)}
           </div>
           <div className="mt-1 text-[10px] font-mono text-slate-500">
-            {purchaseBills.length} inward bills registered
+            {billsState.items.length} inward bills registered
           </div>
         </div>
 
@@ -453,7 +559,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ navigate }) => {
             Payables to Settle
           </div>
           <div className="text-xl font-bold font-mono text-slate-950 mt-1.5">
-            {formatINR(totalPurchases - 350000, false)}
+            {formatINR(openPayables, false)}
           </div>
           <div className="mt-1 text-[10px] font-mono text-slate-600">
             Credit period active
@@ -476,7 +582,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ navigate }) => {
       {/* Filter Tabs & Search */}
       <div className="bg-white border border-slate-200 rounded-xs p-4 space-y-4">
         <div className="flex items-center gap-1 border-b border-slate-200 pb-3 overflow-x-auto">
-          {['All', 'Received', 'Paid', 'Partially Paid', 'Overdue'].map((tab) => (
+          {BILL_STATUS_TABS.map((tab) => (
             <button
               key={tab}
               onClick={() => setStatusFilter(tab)}
@@ -502,98 +608,157 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ navigate }) => {
               className="w-full pl-9 pr-4 py-2 text-xs border border-slate-300 rounded-xs focus:outline-none focus:border-slate-900"
             />
           </div>
-          <div className="text-xs text-slate-500 font-mono">
-            Showing {filteredBills.length} purchase vouchers
+          <div className="flex items-center gap-3">
+            <div className="text-xs text-slate-500 font-mono">
+              Showing {filteredBills.length} purchase vouchers
+            </div>
+            <button
+              onClick={() => setBillRefresh((t) => t + 1)}
+              disabled={billsState.status === 'loading'}
+              className="bg-white border border-slate-300 hover:bg-slate-50 disabled:opacity-50 text-slate-800 text-xs font-semibold px-3 py-1.5 rounded-xs flex items-center gap-1.5"
+            >
+              <RefreshCw size={13} className={billsState.status === 'loading' ? 'animate-spin' : ''} />
+              <span>Refresh</span>
+            </button>
           </div>
         </div>
       </div>
 
       {/* Purchases Table */}
       <div className="bg-white border border-slate-200 rounded-xs overflow-hidden">
-        <div className="overflow-x-auto">
-          <table className="w-full text-left swiss-table border-collapse">
-            <thead>
-              <tr>
-                <th className="w-28">Bill No</th>
-                <th>Vendor & GSTIN</th>
-                <th className="w-24">Bill Date</th>
-                <th className="w-24">Due Date</th>
-                <th className="text-right w-28">Taxable Amt</th>
-                <th className="text-right w-24">GST Tax</th>
-                <th className="text-right w-32">Total Bill</th>
-                <th className="text-center w-28">ITC Status</th>
-                <th className="text-center w-24">Status</th>
-                <th className="text-right w-16"></th>
-              </tr>
-            </thead>
-            <tbody>
-              {filteredBills.map((b) => (
-                <tr
-                  key={b.id}
-                  onClick={() => setSelectedBill(b)}
-                  className="cursor-pointer hover:bg-slate-50 transition-colors"
-                >
-                  <td className="font-mono font-bold text-slate-900 whitespace-nowrap">
-                    {b.billNumber}
-                  </td>
-                  <td className="text-xs">
-                    <div className="font-semibold text-slate-900">{b.vendorName}</div>
-                    <div className="text-[10px] text-slate-400 font-mono">
-                      GSTIN: {b.vendorGstin}
-                    </div>
-                  </td>
-                  <td className="font-mono text-slate-600 whitespace-nowrap text-xs">
-                    {formatDate(b.date)}
-                  </td>
-                  <td className="font-mono text-slate-600 whitespace-nowrap text-xs">
-                    {formatDate(b.dueDate)}
-                  </td>
-                  <td className="text-right font-mono text-slate-700 whitespace-nowrap">
-                    {formatINR(b.taxableAmount)}
-                  </td>
-                  <td className="text-right font-mono text-slate-600 whitespace-nowrap text-xs">
-                    {formatINR(b.cgst + b.sgst + b.igst)}
-                  </td>
-                  <td className="text-right font-mono font-bold text-slate-950 whitespace-nowrap">
-                    {formatINR(b.totalAmount)}
-                  </td>
-                  <td className="text-center whitespace-nowrap">
-                    <span
-                      className={`px-1.5 py-0.5 text-[10px] font-mono rounded-xs font-semibold ${
-                        b.itcEligible
-                          ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
-                          : 'bg-slate-100 text-slate-500'
-                      }`}
-                    >
-                      {b.itcEligible ? 'ITC Eligible' : 'Ineligible'}
-                    </span>
-                  </td>
-                  <td className="text-center whitespace-nowrap">
-                    <span
-                      className={`px-2 py-0.5 text-[10px] font-mono rounded-xs font-semibold ${
-                        b.status === 'Paid'
-                          ? 'bg-emerald-100 text-emerald-900'
-                          : 'bg-slate-100 text-slate-700'
-                      }`}
-                    >
-                      {b.status}
-                    </span>
-                  </td>
-                  <td className="text-right whitespace-nowrap">
-                    <button
-                      onClick={(e) => {
-                        e.stopPropagation();
-                        setSelectedBill(b);
-                      }}
-                      className="p-1 text-slate-400 hover:text-slate-900"
-                    >
-                      <Eye size={14} />
-                    </button>
-                  </td>
+        <div className="p-4 space-y-3">
+          {billsState.error && billsState.items.length === 0 && (
+            <div className="bg-red-50 border border-red-200 text-red-800 rounded-xs px-3 py-2 text-xs flex items-center justify-between gap-2">
+              <span className="flex items-center gap-2">
+                <AlertCircle size={13} />
+                {getApiErrorMessage({ message: billsState.error }, 'Failed to load purchase bills.')}
+              </span>
+              <button
+                onClick={() => setBillRefresh((t) => t + 1)}
+                className="px-2 py-0.5 border border-red-300 rounded-xs text-red-900 hover:bg-red-100"
+              >
+                Retry
+              </button>
+            </div>
+          )}
+          {billError && (
+            <div className="bg-red-50 border border-red-200 text-red-800 rounded-xs px-3 py-2 text-xs flex items-center justify-between gap-2">
+              <span className="flex items-center gap-2"><AlertCircle size={13} />{billError}</span>
+              <button onClick={() => setBillError('')} className="p-0.5 hover:text-red-950" title="Dismiss">
+                <X size={13} />
+              </button>
+            </div>
+          )}
+          {billSuccess && (
+            <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xs px-3 py-2 text-xs flex items-center justify-between gap-2">
+              <span className="flex items-center gap-2"><CheckCircle2 size={13} />{billSuccess}</span>
+              <button onClick={() => setBillSuccess('')} className="p-0.5 hover:text-emerald-950" title="Dismiss">
+                <X size={13} />
+              </button>
+            </div>
+          )}
+
+          <div className="overflow-x-auto">
+            <table className="w-full text-left swiss-table border-collapse">
+              <thead>
+                <tr>
+                  <th className="w-28">Bill No</th>
+                  <th>Vendor & GSTIN</th>
+                  <th className="w-24">Bill Date</th>
+                  <th className="w-24">Due Date</th>
+                  <th className="text-right w-28">Taxable Amt</th>
+                  <th className="text-right w-24">GST Tax</th>
+                  <th className="text-right w-32">Total Bill</th>
+                  <th className="text-center w-28">ITC Status</th>
+                  <th className="text-center w-24">Status</th>
+                  <th className="text-right w-16"></th>
                 </tr>
-              ))}
-            </tbody>
-          </table>
+              </thead>
+              <tbody>
+                {billsState.status === 'loading' && billsState.items.length === 0 ? (
+                  <tr>
+                    <td colSpan={10} className="py-10 text-center text-slate-400 text-xs font-mono flex items-center justify-center gap-2">
+                      <Loader2 size={14} className="animate-spin" /> Loading purchase bills...
+                    </td>
+                  </tr>
+                ) : billsState.items.length === 0 ? (
+                  <tr>
+                    <td colSpan={10} className="py-10 text-center text-slate-400 text-xs font-mono">
+                      No purchase bills yet. Use “Record Vendor Bill” to create one.
+                    </td>
+                  </tr>
+                ) : (
+                  filteredBills.map((b) => (
+                    <tr
+                      key={b.id}
+                      onClick={() => {
+                        setSelectedBillId(b.id);
+                        setBillError('');
+                        setBillSuccess('');
+                      }}
+                      className="cursor-pointer hover:bg-slate-50 transition-colors"
+                    >
+                      <td className="font-mono font-bold text-slate-900 whitespace-nowrap">
+                        {b.billNumber}
+                      </td>
+                      <td className="text-xs">
+                        <div className="font-semibold text-slate-900">{vendorLabel(b)}</div>
+                        <div className="text-[10px] text-slate-400 font-mono">
+                          GSTIN: {vendorGstinLabel(b) || '—'}
+                        </div>
+                      </td>
+                      <td className="font-mono text-slate-600 whitespace-nowrap text-xs">
+                        {formatDate(b.billDate)}
+                      </td>
+                      <td className="font-mono text-slate-600 whitespace-nowrap text-xs">
+                        {b.dueDate ? formatDate(b.dueDate) : '—'}
+                      </td>
+                      <td className="text-right font-mono text-slate-700 whitespace-nowrap">
+                        {formatINR(Number(b.taxableAmount))}
+                      </td>
+                      <td className="text-right font-mono text-slate-600 whitespace-nowrap text-xs">
+                        {formatINR(Number(b.cgstAmount) + Number(b.sgstAmount) + Number(b.igstAmount))}
+                      </td>
+                      <td className="text-right font-mono font-bold text-slate-950 whitespace-nowrap">
+                        {formatINR(Number(b.grandTotal))}
+                      </td>
+                      <td className="text-center whitespace-nowrap">
+                        <span
+                          className={`px-1.5 py-0.5 text-[10px] font-mono rounded-xs font-semibold ${
+                            b.itcEligible
+                              ? 'bg-emerald-50 text-emerald-800 border border-emerald-200'
+                              : 'bg-slate-100 text-slate-500'
+                          }`}
+                        >
+                          {b.itcEligible ? 'ITC Eligible' : 'Ineligible'}
+                        </span>
+                      </td>
+                      <td className="text-center whitespace-nowrap">
+                        <span
+                          className={`px-2 py-0.5 text-[10px] font-mono rounded-xs font-semibold ${billStatusBadgeClass(b.status)}`}
+                        >
+                          {b.status}
+                        </span>
+                      </td>
+                      <td className="text-right whitespace-nowrap">
+                        <button
+                          onClick={(e) => {
+                            e.stopPropagation();
+                            setSelectedBillId(b.id);
+                            setBillError('');
+                            setBillSuccess('');
+                          }}
+                          className="p-1 text-slate-400 hover:text-slate-900"
+                        >
+                          <Eye size={14} />
+                        </button>
+                      </td>
+                    </tr>
+                  ))
+                )}
+              </tbody>
+            </table>
+          </div>
         </div>
       </div>
 
@@ -894,11 +1059,10 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ navigate }) => {
 
                 <div>
                   <label className="block font-medium text-slate-700 mb-1">
-                    Payment Due Date *
+                    Payment Due Date
                   </label>
                   <input
                     type="date"
-                    required
                     value={dueDate}
                     onChange={(e) => setDueDate(e.target.value)}
                     className="w-full px-3 py-2 border border-slate-300 rounded-xs font-mono focus:outline-none focus:border-slate-900"
@@ -952,6 +1116,12 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ navigate }) => {
                 </label>
               </div>
 
+              {billError && (
+                <div className="bg-red-50 border border-red-200 text-red-800 rounded-xs px-3 py-2 text-xs flex items-center gap-2">
+                  <AlertCircle size={13} />{billError}
+                </div>
+              )}
+
               <div className="pt-4 border-t border-slate-200 flex items-center justify-end gap-3">
                 <button
                   type="button"
@@ -962,13 +1132,13 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ navigate }) => {
                 </button>
                 <button
                   type="submit"
-                  disabled={isSubmittingBill}
+                  disabled={billBusy !== null}
                   className="px-5 py-2 bg-slate-950 disabled:opacity-50 text-white hover:bg-slate-800 rounded-xs font-semibold flex items-center gap-2"
                 >
-                  {isSubmittingBill ? (
+                  {billBusy === 'create' ? (
                     <>
-                      <div className="w-3 h-3 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                      <span>Posting Bill...</span>
+                      <Loader2 size={13} className="animate-spin" />
+                      <span>Saving Draft...</span>
                     </>
                   ) : (
                     <span>Inward Bill to Ledger</span>
@@ -985,7 +1155,7 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ navigate }) => {
         <div className="fixed inset-0 z-50 overflow-hidden">
           <div
             className="absolute inset-0 bg-slate-950/40 backdrop-blur-2xs"
-            onClick={() => setSelectedBill(null)}
+            onClick={() => setSelectedBillId(null)}
           />
           <div className="fixed inset-y-0 right-0 max-w-full flex pl-0 xs:pl-6 sm:pl-10">
             <div className="w-screen max-w-md bg-white shadow-2xl border-l border-slate-200 flex flex-col">
@@ -995,11 +1165,11 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ navigate }) => {
                     Purchase Bill • {selectedBill.billNumber}
                   </h3>
                   <p className="text-xs text-slate-500 font-mono">
-                    Inwarded on {formatDate(selectedBill.date)}
+                    Inwarded on {formatDate(selectedBill.billDate)} • {selectedBill.status}
                   </p>
                 </div>
                 <button
-                  onClick={() => setSelectedBill(null)}
+                  onClick={() => setSelectedBillId(null)}
                   className="p-1 rounded-xs hover:bg-slate-100 text-slate-400 hover:text-slate-700"
                 >
                   <X size={18} />
@@ -1012,29 +1182,29 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ navigate }) => {
                     Total Inward Bill Value
                   </div>
                   <div className="text-2xl font-bold font-mono text-slate-950 mt-1">
-                    {formatINR(selectedBill.totalAmount)}
+                    {formatINR(Number(selectedBill.grandTotal))}
                   </div>
                   <div className="mt-1 text-slate-600 text-xs font-semibold">
-                    {selectedBill.vendorName}
+                    {vendorLabel(selectedBill)}
                   </div>
                 </div>
 
                 <div className="space-y-2.5 font-mono text-xs">
                   <div className="flex justify-between border-b border-slate-100 pb-1.5">
                     <span className="text-slate-500 font-sans">Vendor GSTIN:</span>
-                    <span className="font-bold text-slate-900">{selectedBill.vendorGstin}</span>
+                    <span className="font-bold text-slate-900">{vendorGstinLabel(selectedBill) || '—'}</span>
                   </div>
                   <div className="flex justify-between border-b border-slate-100 pb-1.5">
                     <span className="text-slate-500 font-sans">Taxable Base:</span>
-                    <span className="text-slate-900">{formatINR(selectedBill.taxableAmount)}</span>
+                    <span className="text-slate-900">{formatINR(Number(selectedBill.taxableAmount))}</span>
                   </div>
                   <div className="flex justify-between border-b border-slate-100 pb-1.5">
                     <span className="text-slate-500 font-sans">CGST + SGST:</span>
-                    <span className="text-slate-900">{formatINR(selectedBill.cgst + selectedBill.sgst)}</span>
+                    <span className="text-slate-900">{formatINR(Number(selectedBill.cgstAmount) + Number(selectedBill.sgstAmount))}</span>
                   </div>
                   <div className="flex justify-between border-b border-slate-100 pb-1.5">
                     <span className="text-slate-500 font-sans">Payment Due Date:</span>
-                    <span className="text-slate-900">{formatDate(selectedBill.dueDate)}</span>
+                    <span className="text-slate-900">{selectedBill.dueDate ? formatDate(selectedBill.dueDate) : '—'}</span>
                   </div>
                   <div className="flex justify-between border-b border-slate-100 pb-1.5">
                     <span className="text-slate-500 font-sans">ITC Eligibility:</span>
@@ -1052,33 +1222,99 @@ export const PurchasesView: React.FC<PurchasesViewProps> = ({ navigate }) => {
                   <div className="bg-slate-900 text-slate-200 p-3 rounded-xs font-mono text-[11px] space-y-1">
                     <div className="flex justify-between">
                       <span>Dr. Purchase Account</span>
-                      <span>{formatINR(selectedBill.taxableAmount)}</span>
+                      <span>{formatINR(Number(selectedBill.taxableAmount))}</span>
                     </div>
                     <div className="flex justify-between text-emerald-400">
                       <span>Dr. Input Tax Credit (ITC) CGST/SGST</span>
-                      <span>{formatINR(selectedBill.cgst + selectedBill.sgst)}</span>
+                      <span>{formatINR(Number(selectedBill.itcClaimedAmount))}</span>
                     </div>
                     <div className="flex justify-between text-slate-400 pl-4 border-t border-slate-800 pt-1">
-                      <span>Cr. {selectedBill.vendorName} Ledger</span>
-                      <span>{formatINR(selectedBill.totalAmount)}</span>
+                      <span>Cr. {vendorLabel(selectedBill)} Ledger</span>
+                      <span>{formatINR(Number(selectedBill.grandTotal))}</span>
                     </div>
                   </div>
                 </div>
               </div>
 
-              <div className="p-4 border-t border-slate-200 bg-slate-50 flex items-center justify-between">
-                <button
-                  onClick={() => updatePurchaseBillStatus(selectedBill.id, 'Paid')}
-                  className="px-3 py-1.5 bg-emerald-700 text-white hover:bg-emerald-800 text-xs font-semibold rounded-xs"
-                >
-                  Mark as Paid
-                </button>
-                <button
-                  onClick={() => setSelectedBill(null)}
-                  className="px-4 py-1.5 bg-slate-900 text-white rounded-xs text-xs font-semibold"
-                >
-                  Close
-                </button>
+              <div className="p-4 border-t border-slate-200 bg-slate-50 space-y-2">
+                {billError && (
+                  <div className="bg-red-50 border border-red-200 text-red-800 rounded-xs px-3 py-2 text-xs flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-2"><AlertCircle size={13} />{billError}</span>
+                    <button onClick={() => setBillError('')} className="p-0.5 hover:text-red-950" title="Dismiss">
+                      <X size={13} />
+                    </button>
+                  </div>
+                )}
+                {billSuccess && (
+                  <div className="bg-emerald-50 border border-emerald-200 text-emerald-800 rounded-xs px-3 py-2 text-xs flex items-center justify-between gap-2">
+                    <span className="flex items-center gap-2"><CheckCircle2 size={13} />{billSuccess}</span>
+                    <button onClick={() => setBillSuccess('')} className="p-0.5 hover:text-emerald-950" title="Dismiss">
+                      <X size={13} />
+                    </button>
+                  </div>
+                )}
+                <div className="flex items-center justify-between gap-2">
+                  <div className="flex items-center gap-2 flex-wrap">
+                    {selectedBill.status === 'DRAFT' && (
+                      <>
+                        <button
+                          onClick={() => handleFinalizeBill(selectedBill)}
+                          disabled={billBusy !== null}
+                          className="px-3 py-1.5 bg-emerald-700 disabled:opacity-50 text-white hover:bg-emerald-800 text-xs font-semibold rounded-xs font-mono flex items-center gap-1.5"
+                          title="Finalize the bill: generates the bill number and posts the double-entry journal"
+                        >
+                          {billBusy === 'Finalize' ? <Loader2 size={13} className="animate-spin" /> : <ShieldCheck size={13} />}
+                          <span>Finalize Bill</span>
+                        </button>
+                        <button
+                          onClick={() => handleEditNotes(selectedBill)}
+                          disabled={billBusy !== null}
+                          className="px-3 py-1.5 bg-white disabled:opacity-50 border border-slate-300 text-slate-800 hover:bg-slate-100 text-xs font-medium rounded-xs font-mono flex items-center gap-1.5"
+                          title="PATCH /bills/:id — draft notes"
+                        >
+                          {billBusy === 'Update' ? <Loader2 size={13} className="animate-spin" /> : <FileText size={13} />}
+                          <span>Edit Notes</span>
+                        </button>
+                        <button
+                          onClick={() => handleDeleteDraft(selectedBill)}
+                          disabled={billBusy !== null}
+                          className="px-3 py-1.5 bg-white disabled:opacity-50 border border-red-300 text-red-700 hover:bg-red-50 text-xs font-semibold rounded-xs font-mono flex items-center gap-1.5"
+                          title="DELETE /bills/:id — only DRAFT bills can be deleted"
+                        >
+                          {billBusy === 'Delete' ? <Loader2 size={13} className="animate-spin" /> : <Trash2 size={13} />}
+                          <span>Delete Draft</span>
+                        </button>
+                      </>
+                    )}
+                    {selectedBill.status === 'FINALIZED' && (
+                      <button
+                        onClick={() => handleCancelBill(selectedBill)}
+                        disabled={billBusy !== null}
+                        className="px-3 py-1.5 bg-white disabled:opacity-50 border border-red-300 text-red-700 hover:bg-red-50 text-xs font-semibold rounded-xs font-mono flex items-center gap-1.5"
+                        title="Cancels the bill and reverses its posted journal entry"
+                      >
+                        {billBusy === 'Cancel' ? <Loader2 size={13} className="animate-spin" /> : <Ban size={13} />}
+                        <span>Cancel Bill</span>
+                      </button>
+                    )}
+                    {selectedBill.status === 'CANCELLED' && (
+                      <span className="text-[11px] font-mono text-slate-500 flex items-center gap-1.5">
+                        <Ban size={13} /> Cancelled — journal entry reversed
+                      </span>
+                    )}
+                    {(selectedBill.status === 'PAID' || selectedBill.status === 'PARTIALLY_PAID') && (
+                      <span className="text-[11px] font-mono text-emerald-700 flex items-center gap-1.5">
+                        <CheckCircle2 size={13} /> Settled — no actions available
+                      </span>
+                    )}
+                  </div>
+                  <button
+                    onClick={() => setSelectedBillId(null)}
+                    className="px-4 py-1.5 bg-slate-900 text-white rounded-xs text-xs font-semibold"
+                  >
+                    Close
+                  </button>
+                </div>
               </div>
             </div>
           </div>

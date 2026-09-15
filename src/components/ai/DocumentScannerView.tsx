@@ -16,7 +16,15 @@ import {
   Check
 } from 'lucide-react';
 import { useAccounting } from '../../context/AccountingContext';
+import { useAppDispatch, useAppSelector } from '../../app/hooks';
+import { createBill } from '../../features/purchases/purchasesSlice';
+import { uploadFile } from '../../features/files/filesSlice';
+import { extractBill } from '../../features/ai/aiSlice';
+import { getApiErrorMessage } from '../../utils/apiErrorMessage';
 import { formatINR } from '../../utils/formatters';
+import type { RootState } from '../../app/store';
+import type { UploadFileResponse } from '../../api/filesTypes';
+import type { AiExtractionProposal, ExtractedBillResponseDto } from '../../api/aiTypes';
 
 interface DocumentScannerViewProps {
   navigate: (route: string) => void;
@@ -40,62 +48,72 @@ interface ExtractedBillData {
 }
 
 export const DocumentScannerView: React.FC<DocumentScannerViewProps> = ({ navigate }) => {
-  const { currentOrg, addPurchaseBill, vendors } = useAccounting();
+  const { vendors } = useAccounting();
+  const dispatch = useAppDispatch();
   const fileInputRef = useRef<HTMLInputElement>(null);
 
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [submitStatus, setSubmitStatus] = useState<'IDLE' | 'SUBMITTING' | 'SUCCESS' | 'ERROR'>('IDLE');
+  const [errorMessage, setErrorMessage] = useState('');
   const [isEditing, setIsEditing] = useState(false);
 
   const [extractedData, setExtractedData] = useState<ExtractedBillData | null>(null);
 
-  const processFileExtraction = (fileName: string, fileSize: string, sampleVendor?: string) => {
+  const processFileExtraction = async (file: File) => {
     setIsProcessing(true);
     setExtractedData(null);
     setSubmitStatus('IDLE');
+    setErrorMessage('');
 
-    setTimeout(() => {
-      setIsProcessing(false);
-      const isAltVendor = sampleVendor === 'Kulkarni Steel Works';
-      const vendorName = sampleVendor || (isAltVendor ? 'Kulkarni Steel Works' : 'Precision Components Pvt Ltd');
-      const vendorGstin = isAltVendor ? '27AAACK1290P1ZQ' : '27AABCV8812K1Z9';
-      const invoiceNumber = isAltVendor ? 'KS-INV-2026-441' : 'INV-PC-2026-904';
-      const taxable = isAltVendor ? 120000 : 65000;
-      const gstRate = 18;
-      const totalGst = (taxable * gstRate) / 100;
-      const cgst = Math.round(totalGst / 2);
-      const sgst = Math.round(totalGst / 2);
+    try {
+      // Upload file using files API
+      const organizationId = 'org_acme'; // TODO: Get from auth context
+      const uploadResponse = await dispatch(uploadFile({ organizationId, file })).unwrap();
+      const fileId = uploadResponse.file.id;
+
+      // Extract bill using AI API
+      const extractionResponse = await dispatch(extractBill({ organizationId, fileId })).unwrap();
+
+      // Map the extraction response to our extractedData format
+      const suggested = extractionResponse.proposedAction;
 
       setExtractedData({
-        fileName: fileName || 'tax_invoice_aug2026.pdf',
-        fileSize: fileSize || '245 KB',
-        vendorName,
-        vendorGstin,
-        invoiceNumber,
-        date: '2026-08-07',
-        dueDate: '2026-09-06',
-        taxableAmount: taxable,
-        gstRate,
-        cgst,
-        sgst,
-        igst: 0,
-        totalAmount: taxable + totalGst,
-        hsn: isAltVendor ? '7208' : '8466',
+        fileName: file.name,
+        fileSize: `${(file.size / 1024).toFixed(0)} KB`,
+        vendorName: suggested.vendorName,
+        vendorGstin: suggested.vendorGstin,
+        invoiceNumber: suggested.invoiceNumber,
+        date: suggested.date,
+        dueDate: suggested.dueDate || '',
+        taxableAmount: suggested.taxableAmount,
+        gstRate: suggested.gstRate,
+        cgst: suggested.cgst,
+        sgst: suggested.sgst,
+        igst: suggested.igst,
+        totalAmount: suggested.totalAmount,
+        hsn: suggested.hsn || '',
       });
-    }, 900);
-  };
 
-  const handleFileInputChange = (e: React.ChangeEvent<HTMLInputElement>) => {
-    const file = e.target.files?.[0];
-    if (file) {
-      const sizeStr = `${(file.size / 1024).toFixed(0)} KB`;
-      processFileExtraction(file.name, sizeStr);
+      setIsProcessing(false);
+    } catch (error) {
+      setIsProcessing(false);
+      setErrorMessage(getApiErrorMessage(error, 'Failed to process document'));
     }
   };
 
-  const handleSimulateSample = (sampleVendor: string) => {
-    processFileExtraction(`${sampleVendor.toLowerCase().replace(/\s+/g, '_')}_bill.pdf`, '380 KB', sampleVendor);
+  const handleFileInputChange = async (e: React.ChangeEvent<HTMLInputElement>) => {
+    const file = e.target.files?.[0];
+    if (file) {
+      await processFileExtraction(file);
+    }
+  };
+
+  const handleSimulateSample = async (sampleVendor: string) => {
+    // Create a dummy file for sample vendors
+    const dummyContent = `%PDF-1.4\n%Dummy PDF content for ${sampleVendor}\n%%EOF`;
+    const dummyFile = new File([dummyContent], `${sampleVendor.toLowerCase().replace(/\s+/g, '_')}_bill.pdf`, { type: 'application/pdf' });
+    await processFileExtraction(dummyFile);
   };
 
   const handleFieldChange = (field: keyof ExtractedBillData, value: any) => {
@@ -112,54 +130,50 @@ export const DocumentScannerView: React.FC<DocumentScannerViewProps> = ({ naviga
     setExtractedData(updated);
   };
 
-  const handleConfirmAndPost = () => {
+  const handleConfirmAndPost = async () => {
     if (!extractedData || submitStatus === 'SUBMITTING') return;
     setSubmitStatus('SUBMITTING');
+    setErrorMessage('');
 
-    setTimeout(() => {
-      const vendor = vendors.find((v) => v.gstin === extractedData.vendorGstin) || vendors[0] || {
-        id: `v_${Date.now()}`,
-        name: extractedData.vendorName,
-        gstin: extractedData.vendorGstin,
-      };
+    // Dispatch the real create thunk (the backend recomputes all totals server-side).
+    setTimeout(async () => {
+      const vendor = vendors.find((v) => v.gstin === extractedData.vendorGstin) || vendors[0];
+      if (!vendor) {
+        setErrorMessage('No vendor available to attach this bill. Create a vendor first.');
+        setSubmitStatus('ERROR');
+        return;
+      }
+      const taxable = Number(extractedData.taxableAmount) || 0;
+      const rate = Number(extractedData.gstRate) || 0;
 
-      addPurchaseBill({
-        billNumber: extractedData.invoiceNumber,
-        vendorId: vendor.id,
-        vendorName: extractedData.vendorName,
-        vendorGstin: extractedData.vendorGstin,
-        date: extractedData.date,
-        dueDate: extractedData.dueDate,
-        items: [
-          {
-            id: `ocr_item_${Date.now()}`,
-            description: `Industrial Inward Materials (HSN ${extractedData.hsn})`,
-            hsn: extractedData.hsn,
-            quantity: 1,
-            unit: 'SET',
-            rate: extractedData.taxableAmount,
-            discountPct: 0,
-            gstRate: extractedData.gstRate,
-            amount: extractedData.taxableAmount,
-            cgst: extractedData.cgst,
-            sgst: extractedData.sgst,
-            igst: extractedData.igst,
-          },
-        ],
-        taxableAmount: extractedData.taxableAmount,
-        cgst: extractedData.cgst,
-        sgst: extractedData.sgst,
-        igst: extractedData.igst,
-        totalAmount: extractedData.totalAmount,
-        amountPaid: 0,
-        status: 'Received',
-        itcEligible: true,
-      });
-
-      setSubmitStatus('SUCCESS');
-      setTimeout(() => {
-        navigate('/purchases');
-      }, 800);
+      try {
+        await dispatch(
+          createBill({
+            vendorId: vendor.id,
+            vendorInvoiceNumber: extractedData.invoiceNumber,
+            billDate: extractedData.date,
+            dueDate: extractedData.dueDate || undefined,
+            itcEligible: true,
+            items: [
+              {
+                description: `Industrial Inward Materials (HSN ${extractedData.hsn})`,
+                hsn: extractedData.hsn,
+                quantity: 1,
+                unitPrice: taxable,
+                taxRate: rate,
+                itcEligible: true,
+              },
+            ],
+          }),
+        ).unwrap();
+        setSubmitStatus('SUCCESS');
+        setTimeout(() => {
+          navigate('/purchases');
+        }, 800);
+      } catch (err) {
+        setErrorMessage(getApiErrorMessage(err, 'Failed to inward the bill.'));
+        setSubmitStatus('ERROR');
+      }
     }, 700);
   };
 
@@ -200,15 +214,17 @@ export const DocumentScannerView: React.FC<DocumentScannerViewProps> = ({ naviga
               setIsDragging(true);
             }}
             onDragLeave={() => setIsDragging(false)}
-            onDrop={(e) => {
+            onDrop={async (e) => {
               e.preventDefault();
               setIsDragging(false);
               const file = e.dataTransfer.files?.[0];
               if (file) {
-                const sizeStr = `${(file.size / 1024).toFixed(0)} KB`;
-                processFileExtraction(file.name, sizeStr);
+                await processFileExtraction(file);
               } else {
-                processFileExtraction('dropped_tax_invoice.pdf', '310 KB');
+                // Create a dummy file for the fallback case
+                const dummyContent = `%PDF-1.4\n%Dummy PDF content for dropped file\n%%EOF`;
+                const dummyFile = new File([dummyContent], 'dropped_tax_invoice.pdf', { type: 'application/pdf' });
+                await processFileExtraction(dummyFile);
               }
             }}
             onClick={() => fileInputRef.current?.click()}
@@ -449,7 +465,13 @@ export const DocumentScannerView: React.FC<DocumentScannerViewProps> = ({ naviga
           </div>
 
           {extractedData && (
-            <div className="pt-4 border-t border-slate-200 flex items-center justify-between gap-3">
+            <div className="pt-4 border-t border-slate-200 space-y-3">
+              {errorMessage && (
+                <div className="bg-red-50 border border-red-200 text-red-800 rounded-xs px-3 py-2 text-xs flex items-center gap-2">
+                  <AlertCircle size={13} />{errorMessage}
+                </div>
+              )}
+              <div className="flex items-center justify-between gap-3">
               <button
                 type="button"
                 onClick={() => setExtractedData(null)}
@@ -483,6 +505,7 @@ export const DocumentScannerView: React.FC<DocumentScannerViewProps> = ({ naviga
                   </>
                 )}
               </button>
+              </div>
             </div>
           )}
         </div>

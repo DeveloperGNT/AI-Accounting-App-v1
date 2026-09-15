@@ -18,7 +18,7 @@ interface ReportsViewProps {
 }
 
 export const ReportsView: React.FC<ReportsViewProps> = ({ navigate }) => {
-  const { metrics, currentOrg, invoices, expenses, purchaseBills } = useAccounting();
+  const { metrics, currentOrg, invoices, expenses } = useAccounting();
 
   const [activeReport, setActiveReport] = useState<
     'PL' | 'BalanceSheet' | 'TrialBalance' | 'Aging' | 'CashFlow' | 'DayBook'

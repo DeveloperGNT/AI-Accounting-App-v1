@@ -213,7 +213,7 @@ export const CorporateTemplate: React.FC<TemplateProps> = ({ data, calculations 
           <div className="text-[10px] text-neutral-500 font-mono uppercase">Executive Authority</div>
           <div className="font-bold text-neutral-950 text-xs mb-6 uppercase">{business.name}</div>
           <div className="border-t border-neutral-400 pt-1 w-48 text-center font-mono">
-            <div className="font-bold text-neutral-900 text-xs">{data.authorizedSignatory || 'Amaan Sharma'}</div>
+            <div className="font-bold text-neutral-900 text-xs">{data.authorizedSignatory || ''}</div>
             <div className="text-[9px] text-neutral-500">{data.signatoryTitle || 'Finance Director'}</div>
           </div>
         </div>

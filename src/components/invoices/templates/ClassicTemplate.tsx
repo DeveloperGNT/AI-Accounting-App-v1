@@ -382,7 +382,7 @@ export const ClassicTemplate: React.FC<TemplateProps> = ({ data, calculations })
             For {business.name || 'ACME INDUSTRIES PVT LTD'}
           </div>
           <div className="mt-6 border-t border-neutral-400 pt-1 w-44 text-center">
-            <div className="font-bold text-neutral-900 text-[10px]">{data.authorizedSignatory || 'Amaan Sharma'}</div>
+            <div className="font-bold text-neutral-900 text-[10px]">{data.authorizedSignatory || ''}</div>
             <div className="text-[8.5px] text-neutral-500">{data.signatoryTitle || 'Authorized Signatory'}</div>
           </div>
         </div>

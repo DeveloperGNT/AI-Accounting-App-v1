@@ -200,7 +200,7 @@ export const MinimalTemplate: React.FC<TemplateProps> = ({ data, calculations })
         </div>
         <div className="text-left sm:text-right">
           <div className="font-sans font-bold text-neutral-900 text-xs uppercase">{business.name}</div>
-          <div>Authorized Signatory: {data.authorizedSignatory || 'Amaan Sharma'}</div>
+          <div>Authorized Signatory: {data.authorizedSignatory || ''}</div>
         </div>
       </div>
     </div>

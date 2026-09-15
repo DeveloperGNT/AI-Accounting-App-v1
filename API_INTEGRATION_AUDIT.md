@@ -25,7 +25,7 @@ undefined. The bug only surfaced once the URL fixes above made these requests ac
 ### ⚠️ URL prefix reality (verified in `main.ts` + swagger.json)
 
 The backend applies `app.setGlobalPrefix('api/v1')` in `main.ts`. Some controllers ALSO hardcode
-`api/v1` in their `@Controller(...)` path (accounts, journal-entries, invoices, payments), so those
+`api/v1` in their `@Controller(...)` path (accounts, journal-entries, invoices, payments, bills), so those
 routes are really served at **`/api/v1/api/v1/...`** (exactly what Swagger displays). Everything else
 (customers, vendors, categories, products, memberships, organizations, users, auth, GST reports)
 uses the single global prefix. The frontend apiClient `baseURL` is `/api/v1`, therefore:
@@ -241,12 +241,82 @@ due), `PARTIALLY_PAID→Partially Paid`, `PAID→Paid`, `CANCELLED→Draft`-grou
 `grossSubtotal/discountTotal/taxableAmount/taxTotal/grandTotal`; per-line tax maps to IGST (the
 backend keeps one tax pool per line and derives the CGST/SGST/IGST split only in GST snapshots).
 
+## 11b. Purchase Bills (full lifecycle)
+
+Backend: `@Controller('api/v1/bills')` + global prefix → real route `/api/v1/api/v1/bills`
+(see the URL prefix note; the service uses relative `/api/v1/bills` paths on the apiClient).
+Verified in read-only `purchases.controller.ts` / `purchases.service.ts`:
+- `CreatePurchaseBillDto` requires `vendorId` (UUID) + `billDate` (date) + `items[≥1]`; each item
+  requires `description` + `quantity` (≥0.0001) + `unitPrice` (≥0). `vendorInvoiceNumber` is the
+  vendor's own reference (optional); the backend owns the internal bill number.
+- Bill numbers are generated at finalize time (drafts are stored as `DRAFT-<timestamp>`).
+- Statuses: `DRAFT → FINALIZED → PAID / PARTIALLY_PAID / CANCELLED`. Only DRAFT bills can be
+  updated or deleted; only DRAFT bills can be finalized (posts the double-entry journal); only
+  FINALIZED bills can be cancelled (reverses the journal). Reverse-charge bills are rejected at
+  finalize until a dedicated RCM module exists.
+- `GET /bills` and `GET /bills/{id}` both load the `vendor` + `items` relations, so the list
+  already includes line items; the drawer still dispatches `GET /bills/{id}` on view to refresh
+  status/items (mirrors the invoices drawer pattern).
+
+| Module | Method | Endpoint | API Service | Redux Thunk | UI Component | dispatch() used? | Reaches API? | Mock still used? | Status |
+|---|---|---|---|---|---|---|---|---|---|
+| Purchase Bills | GET | /api/v1/api/v1/bills | purchasesApi.list | fetchBills | PurchasesView (mount / tenant switch / Refresh / Retry) | ✅ | ✅ | ❌ | ✅ |
+| Purchase Bills | GET | /api/v1/api/v1/bills/{id} | purchasesApi.get | fetchBillById | PurchasesView bill drawer (open/view) | ✅ | ✅ | ❌ | ✅ |
+| Purchase Bills | POST | /api/v1/api/v1/bills | purchasesApi.create | createBill | PurchasesView "Record Vendor Bill" modal + DocumentScannerView OCR "Authorize & Inward Bill" | ✅ | ✅ | ❌ | ✅ |
+| Purchase Bills | PATCH | /api/v1/api/v1/bills/{id} | purchasesApi.update | updateBill | PurchasesView bill drawer "Edit Notes" | ✅ | ✅ | ❌ | ✅ |
+| Purchase Bills | DELETE | /api/v1/api/v1/bills/{id} | purchasesApi.remove | deleteBill | PurchasesView bill drawer "Delete Draft" | ✅ | ✅ | ❌ | ✅ |
+| Purchase Bills | POST | /api/v1/api/v1/bills/{id}/finalize | purchasesApi.finalize | finalizeBill | PurchasesView bill drawer "Finalize Bill" | ✅ | ✅ | ❌ | ✅ |
+| Purchase Bills | POST | /api/v1/api/v1/bills/{id}/cancel | purchasesApi.cancel | cancelBill | PurchasesView bill drawer "Cancel Bill" | ✅ | ✅ | ❌ | ✅ |
+
+The legacy mock `AccountingContext.addPurchaseBill` / `updatePurchaseBillStatus` /
+`deletePurchaseBill` and the `INITIAL_PURCHASE_BILLS` seed (with its `ai_acc_purchase_bills`
+localStorage persistence) were removed. PurchasesView now reads `state.purchases.items` and the
+drawer's Finalize / Edit Notes / Delete Draft / Cancel actions are gated on the backend status
+rules; the "Mark as Paid" mock button was removed (no backend "mark paid" endpoint exists — AP
+settlement is Phase 12 scope). A `billBusy` lock prevents duplicate submissions, and backend
+validation errors surface via `getApiErrorMessage`.
+
+## 11c. Expenses (full lifecycle)
+
+Backend: `@Controller('api/v1/expenses')` + global prefix → real route `/api/v1/api/v1/expenses`
+(see the URL prefix note; the service uses relative `/api/v1/expenses` paths on the apiClient).
+Verified in read-only `expenses.controller.ts` / `expenses.service.ts`:
+- `CreateExpenseDto` requires `expenseDate` + `categoryId` (UUID) + `items[≥1]`; each item
+  requires `quantity` (> 0) + `unitPrice` (≥ 0) + `taxRate` (0–100); `vendorId`, per-item
+  `expenseAccountId`, `notes`, `tdsApplicable`, `tdsRate` are optional. The backend generates
+  the expense number.
+- Statuses: `DRAFT → SUBMITTED → APPROVED → POSTED / REVERSED / CANCELLED`. Only DRAFT can be
+  submitted; only SUBMITTED can be approved; only APPROVED can be posted; only POSTED can be
+  reversed; DRAFT/SUBMITTED/APPROVED can be cancelled. `post` accepts `{ paid, paymentMethod?,
+  paymentAccountId? }` — when `paid` is true, `paymentAccountId` (bank/cash account) is required
+  and the backend books the payment journal entry; posting books the double-entry journal and
+  the frontend only reflects backend-confirmed results.
+- `GET /expenses` returns a bare array (the slice guards with `Array.isArray`); the drawer
+  dispatches `GET /expenses/{id}` on view to refresh status/items (mirrors the invoices /
+  purchases drawer pattern).
+
+| Module | Method | Endpoint | API Service | Redux Thunk | UI Component | dispatch() used? | Reaches API? | Mock still used? | Status |
+|---|---|---|---|---|---|---|---|---|---|
+| Expenses | GET | /api/v1/api/v1/expenses | expensesApi.list | fetchExpenses | ExpensesView (mount / tenant switch / Refresh / Retry) | ✔ | ✔ | ✘ | ✔ |
+| Expenses | GET | /api/v1/api/v1/expenses/{id} | expensesApi.get | fetchExpenseById | ExpensesView expense drawer (open/view) | ✔ | ✔ | ✘ | ✔ |
+| Expenses | POST | /api/v1/api/v1/expenses | expensesApi.create | createExpense | ExpensesView "Add Expense" modal | ✔ | ✔ | ✘ | ✔ |
+| Expenses | POST | /api/v1/api/v1/expenses/{id}/submit | expensesApi.submit | submitExpense | ExpensesView expense drawer "Submit" (DRAFT only) | ✔ | ✔ | ✘ | ✔ |
+| Expenses | POST | /api/v1/api/v1/expenses/{id}/approve | expensesApi.approve | approveExpense | ExpensesView expense drawer "Approve" (SUBMITTED only) | ✔ | ✔ | ✘ | ✔ |
+| Expenses | POST | /api/v1/api/v1/expenses/{id}/post | expensesApi.post | postExpense | ExpensesView expense drawer "Post to Ledger" (APPROVED only; account picker when marking paid) | ✔ | ✔ | ✘ | ✔ |
+| Expenses | POST | /api/v1/api/v1/expenses/{id}/reverse | expensesApi.reverse | reverseExpense | ExpensesView expense drawer "Reverse" (POSTED only) | ✔ | ✔ | ✘ | ✔ |
+| Expenses | POST | /api/v1/api/v1/expenses/{id}/cancel | expensesApi.cancel | cancelExpense | ExpensesView expense drawer "Cancel" | ✔ | ✔ | ✘ | ✔ |
+
+The legacy mock `AccountingContext.addExpense` and the `INITIAL_EXPENSES` seed were removed.
+ExpensesView now reads `state.expenses.items`; drawer actions are gated on the backend status
+rules above (Submit on DRAFT, Approve on SUBMITTED, Post on APPROVED, Reverse on POSTED). An
+`expenseBusy` lock prevents duplicate submissions, and backend validation errors surface via
+`getApiErrorMessage`. The category / vendor / account pickers reuse the existing categories /
+vendors / accounts slices — no mock UUIDs.
+
 ## Mock / local-only areas intentionally left
 
 These have **no backend module the existing frontend API layer covers** (endpoints exist in swagger for some, but no frontend API service/slice was ever created for them — creating those is future work, not a wiring fix):
 
-- **Purchase bills** — PurchasesView via `AccountingContext.addPurchaseBill` (local state). No purchasesApi/slice yet.
-- **Expenses** — ExpensesView via `AccountingContext.addExpense` (local state). No expensesApi/slice yet (the view only *reads* categories + accounts from the API).
 - **Banking, review queue, notifications, AI insights, audit log, documents** — mock data in AccountingContext; backend modules for files/AI/notifications exist but no frontend API layer was built for them.
 - **Transaction voucher (Record Transaction Voucher modal)** — local `addTransaction`; no matching backend endpoint contract in the frontend API layer.
 
@@ -255,3 +325,5 @@ These have **no backend module the existing frontend API layer covers** (endpoin
 - `AccountingContext` no longer persists **customers, vendors, or users** to localStorage; customer/vendor lists now come from the Redux API slices (`GET /customers`, `GET /vendors`).
 - `INITIAL_USERS` / `INITIAL_CUSTOMERS` / `INITIAL_VENDORS` mock seeding removed from the provider; the dead `inviteUser: undefined` context member and its mock `addCustomer` / `addVendor` mutations are gone (CustomersView / VendorsView are fully thunk-driven).
 - `INITIAL_INVOICES` mock seeding, its `ai_acc_invoices` localStorage persistence, and the `addInvoice` / `updateInvoiceStatus` / `deleteInvoice` context mutations are gone. SalesView + InvoiceCreationFlow dispatch the invoicesSlice thunks directly; the SalesView create-modal dead code (never opened) was removed in favor of the editor flow.
+- `INITIAL_PURCHASE_BILLS` mock seeding, its `ai_acc_purchase_bills` localStorage persistence, and the `addPurchaseBill` / `updatePurchaseBillStatus` / `deletePurchaseBill` context mutations are gone. PurchasesView + DocumentScannerView dispatch the purchasesSlice thunks (`fetchBills` / `createBill` / `updateBill` / `deleteBill` / `finalizeBill` / `cancelBill`) directly.
+- `INITIAL_EXPENSES` mock seeding and the `addExpense` / `updateExpense` / `deleteExpense` context mutations are gone. ExpensesView dispatches the expensesSlice thunks (`fetchExpenses` / `fetchExpenseById` / `createExpense` / `submitExpense` / `approveExpense` / `postExpense` / `reverseExpense` / `cancelExpense`) directly; AccountingContext only *reads* `state.expenses.items` (backend data, mapped to the legacy UI shape) for dashboard metrics.

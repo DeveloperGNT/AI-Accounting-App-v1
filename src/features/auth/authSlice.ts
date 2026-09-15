@@ -349,4 +349,12 @@ const authSlice = createSlice({
 });
 
 export const { clearAuth, setSessionSummary } = authSlice.actions;
+
+// Selectors
+export const selectCurrentUser = (state: { auth: typeof authSlice }) => state.auth.user;
+export const selectIsAuthenticated = (state: { auth: typeof authSlice }) => state.auth.isAuthenticated;
+export const selectIsInitializing = (state: { auth: typeof authSlice }) => state.auth.isInitializing;
+export const selectAuthStatus = (state: { auth: typeof authSlice }) => state.auth.status;
+export const selectAuthError = (state: { auth: typeof authSlice }) => state.auth.error;
+
 export default authSlice.reducer;

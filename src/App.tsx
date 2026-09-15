@@ -30,6 +30,9 @@ import { ReviewQueueView } from './components/review/ReviewQueueView';
 import { SettingsView } from './components/settings/SettingsView';
 import { AuditLogView } from './components/audit/AuditLogView';
 import { InvoiceCreationFlow } from './components/invoices/InvoiceCreationFlow';
+// Admin Views
+import { OrganizationsView } from './components/admin/OrganizationsView';
+import { UsersView } from './components/admin/UsersView';
 
 const AppContent: React.FC = () => {
   const { currentOrg } = useAccounting();
@@ -130,6 +133,10 @@ const AppContent: React.FC = () => {
         return <SettingsView navigate={navigate} />;
       case '/audit-log':
         return <AuditLogView navigate={navigate} />;
+      case '/admin/organizations':
+        return <OrganizationsView navigate={navigate} />;
+      case '/admin/users':
+        return <UsersView navigate={navigate} />;
       default:
         return <DashboardView navigate={navigate} />;
     }

@@ -93,6 +93,13 @@ export const Sidebar: React.FC<SidebarProps> = ({
         { label: 'Audit Log', route: '/audit-log', icon: History },
       ],
     },
+    {
+      group: 'Platform Administration',
+      items: [
+        { label: 'Organizations', route: '/admin/organizations', icon: Building2 },
+        { label: 'Users', route: '/admin/users', icon: Users },
+      ],
+    },
   ];
 
   const handleNavClick = (route: string) => {
@@ -213,14 +220,14 @@ export const Sidebar: React.FC<SidebarProps> = ({
         <div className="p-4 border-t border-neutral-200 shrink-0 bg-white">
           <div className="flex items-center space-x-3">
             <div className="w-8 h-8 bg-neutral-900 flex items-center justify-center text-white text-xs font-bold shrink-0 font-mono">
-              {currentUser?.avatar || 'AM'}
+              {currentUser?.avatar || (currentUser?.name ? currentUser?.name[0] : 'AM')}
             </div>
             <div className="overflow-hidden min-w-0">
               <p className="text-xs font-semibold truncate text-neutral-900">
-                {currentUser?.name || 'Amaan Sharma'}
+                {currentUser?.name || ''}
               </p>
               <p className="text-[10px] text-neutral-400 uppercase tracking-tight">
-                {currentUser?.role || 'Owner'}
+                {currentUser?.role || ''}
               </p>
             </div>
           </div>
@@ -380,23 +387,23 @@ export const Sidebar: React.FC<SidebarProps> = ({
           {!collapsed ? (
             <div className="flex items-center space-x-2.5">
               <div className="w-8 h-8 bg-neutral-900 flex items-center justify-center text-white text-xs font-bold shrink-0 font-mono">
-                {currentUser?.avatar || 'AM'}
+                {currentUser?.avatar || (currentUser?.name ? currentUser?.name[0] : 'AM')}
               </div>
               <div className="overflow-hidden min-w-0 whitespace-nowrap">
                 <p className="text-xs font-semibold truncate text-neutral-900">
-                  {currentUser?.name || 'Amaan Sharma'}
+                  {currentUser?.name || ''}
                 </p>
                 <p className="text-[10px] text-neutral-400 uppercase tracking-tight truncate">
-                  {currentUser?.role || 'Owner'}
+                  {currentUser?.role || ''}
                 </p>
               </div>
             </div>
           ) : (
             <div
               className="w-8 h-8 bg-neutral-900 flex items-center justify-center text-white text-xs font-bold mx-auto shrink-0 font-mono"
-              title={`${currentUser?.name || 'User'} (${currentUser?.role || 'Owner'})`}
+              title={`${currentUser?.name || ''} (${currentUser?.role || ''})`}
             >
-              {currentUser?.avatar || 'AM'}
+              {currentUser?.avatar || (currentUser?.name ? currentUser?.name[0] : 'AM')}
             </div>
           )}
         </div>

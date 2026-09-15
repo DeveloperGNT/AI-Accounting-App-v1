@@ -166,7 +166,7 @@ export const CompactTemplate: React.FC<TemplateProps> = ({ data, calculations })
         </div>
         <div className="text-right">
           <div className="font-bold text-neutral-900 uppercase">For {business.name}</div>
-          <div className="mt-4 border-t border-neutral-400 pt-0.5 font-bold">{data.authorizedSignatory || 'Amaan Sharma'}</div>
+          <div className="mt-4 border-t border-neutral-400 pt-0.5 font-bold">{data.authorizedSignatory || ''}</div>
           <div className="text-neutral-500">{data.signatoryTitle || 'Authorized Signatory'}</div>
         </div>
       </div>

@@ -1,18 +1,16 @@
-import React, { useState } from 'react';
+import React, { useEffect, useRef, useState } from 'react';
 import {
   Sparkles,
   Send,
-  Bot,
-  User,
   CheckCircle2,
   AlertCircle,
-  FileSpreadsheet,
   ArrowRight,
-  TrendingUp,
   ShieldCheck,
-  Zap
+  Loader2
 } from 'lucide-react';
 import { useAccounting } from '../../context/AccountingContext';
+import { useAppDispatch, useAppSelector } from '../../app/hooks';
+import { chatAi, clearChatError } from '../../features/ai/aiSlice';
 import { formatINR } from '../../utils/formatters';
 
 interface AiAssistantViewProps {
@@ -28,19 +26,27 @@ interface ChatMessage {
   highlightData?: { label: string; value: string }[];
 }
 
+// Chat transcript is ephemeral UI state; the AI answers come from the real
+// backend endpoint POST /organizations/{organizationId}/ai/chat via the
+// chatAi thunk in features/ai/aiSlice. No canned/hardcoded financial replies.
 export const AiAssistantView: React.FC<AiAssistantViewProps> = ({ navigate }) => {
-  const { currentOrg, metrics, invoices, reviewItems } = useAccounting();
+  const { currentOrg, metrics } = useAccounting();
+  const dispatch = useAppDispatch();
+  const activeOrganizationId = useAppSelector(
+    (state) => state.organizations.activeOrganizationId,
+  );
+  const aiState = useAppSelector((state) => state.ai);
 
   const [inputQuery, setInputQuery] = useState('');
   const [messages, setMessages] = useState<ChatMessage[]>([
     {
       id: 'm1',
       sender: 'ai',
-      text: `Hello! I am your AI Accounting Co-pilot configured for **${currentOrg?.name}** (FY ${currentOrg?.financialYear}). I monitor statutory compliance, detect transaction anomalies, reconcile GST returns, and assist with ledger queries.`,
-      timestamp: '10:00 AM',
+      text: `Hello! I am your AI Accounting Co-pilot configured for **${currentOrg?.name ?? 'your organization'}** (FY ${currentOrg?.financialYear ?? ''}). Ask me anything about your ledgers, GST position, or receivables.`,
+      timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
       highlightData: [
         { label: 'Active FY Revenue', value: formatINR(metrics.revenue, false) },
-        { label: 'Claimable ITC', value: '₹91,800' },
+        { label: 'Net GST Payable', value: formatINR(metrics.gstNetPayable, false) },
         { label: 'Pending AI Audits', value: `${metrics.pendingReviewCount} items` },
       ],
       actions: [
@@ -49,18 +55,26 @@ export const AiAssistantView: React.FC<AiAssistantViewProps> = ({ navigate }) =>
       ],
     },
   ]);
-  const [isTyping, setIsTyping] = useState(false);
+  const scrollRef = useRef<HTMLDivElement>(null);
+
+  const isTyping = aiState.chatStatus === 'loading';
+  const chatError = aiState.chatError;
 
   const suggestedPrompts = [
-    'Analyze our cash runway and debtor aging risks',
-    'Explain the GSTR-1 vs 3B tax liability breakdown',
-    'Are there any duplicate payments or missing vendor GSTINs?',
-    'Draft a formal response to GST notice regarding ITC variance',
+    'Summarize my current GST liability and input tax credit',
+    'How much do customers owe me right now?',
+    'What expenses have been posted this financial year?',
+    'Which invoices are still unpaid?',
   ];
 
-  const handleSend = (queryToSend?: string) => {
-    const text = queryToSend || inputQuery;
-    if (!text.trim()) return;
+  useEffect(() => {
+    scrollRef.current?.scrollTo({ top: scrollRef.current.scrollHeight });
+  }, [messages, isTyping]);
+
+  const handleSend = async (queryToSend?: string) => {
+    const text = (queryToSend || inputQuery).trim();
+    if (!text || isTyping) return;
+    if (!activeOrganizationId) return;
 
     const userMsg: ChatMessage = {
       id: `u_${Date.now()}`,
@@ -71,59 +85,32 @@ export const AiAssistantView: React.FC<AiAssistantViewProps> = ({ navigate }) =>
 
     setMessages((prev) => [...prev, userMsg]);
     setInputQuery('');
-    setIsTyping(true);
+    dispatch(clearChatError());
 
-    setTimeout(() => {
-      let aiResponse: ChatMessage;
+    try {
+      // Real backend AI endpoint — the organization id comes from the active
+      // tenant and the Bearer token + x-organization-id headers are attached
+      // by the shared apiClient interceptors.
+      const response = await dispatch(
+        chatAi({ organizationId: activeOrganizationId, query: text }),
+      ).unwrap();
 
-      const lower = text.toLowerCase();
-      if (lower.includes('cash') || lower.includes('runway') || lower.includes('aging')) {
-        aiResponse = {
+      setMessages((prev) => [
+        ...prev,
+        {
           id: `ai_${Date.now()}`,
           sender: 'ai',
-          text: `Based on current bank balances of **${formatINR(metrics.cashAndBank)}** and monthly operating burn of approximately **₹8.42 Lakhs**, **${currentOrg?.name}** maintains **1.5 months of immediate cash runway** without further collections.\n\nHowever, you have **${formatINR(metrics.receivables)}** in outstanding trade receivables across 4 customers. Notably, **Mahindra Aerospace** (₹1.85L) has crossed 30 days credit terms.`,
+          text: response.text,
           timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          actions: [
-            { label: 'Open Receivables Aging Report', route: '/reports' },
-            { label: 'View Overdue Invoices', route: '/sales' },
-          ],
-        };
-      } else if (lower.includes('gst') || lower.includes('gstr') || lower.includes('tax')) {
-        aiResponse = {
-          id: `ai_${Date.now()}`,
-          sender: 'ai',
-          text: `For period **July 2026**:\n- Total Output Liability: **${formatINR(metrics.revenue * 0.18)}** (from B2B tax invoices)\n- Input Tax Credit (ITC) available: **₹91,800** (from inward bills)\n- **Net GST Payable in cash: ₹1,55,032**.\n\nAll outward invoices match GSTR-1 Table 4A. No 2B vs 3B mismatch detected.`,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          actions: [
-            { label: 'Export GSTR-1 JSON', route: '/gst' },
-          ],
-        };
-      } else if (lower.includes('duplicate') || lower.includes('anomaly') || lower.includes('missing')) {
-        aiResponse = {
-          id: `ai_${Date.now()}`,
-          sender: 'ai',
-          text: `I have detected **${reviewItems.length} anomaly items** requiring accountant sign-off:\n1. **Potential Duplicate NEFT**: ₹1,20,000 paid to Kulkarni Steel Works within 48 hours of another identical voucher.\n2. **Missing Vendor GSTIN**: ₹45,000 paid for industrial supplies with no GSTIN recorded — you cannot claim ₹8,100 in ITC until updated.`,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          actions: [
-            { label: 'Open Anomaly Review Queue', route: '/review' },
-          ],
-        };
-      } else {
-        aiResponse = {
-          id: `ai_${Date.now()}`,
-          sender: 'ai',
-          text: `I have analyzed the financial records for **${currentOrg?.name}**. Your current double-entry trial balance is in equilibrium with zero debit/credit variance. All statutory GST ledgers and HDFC bank statement lines are synchronized.\n\nHow else can I assist with your accounting audits or tax filings?`,
-          timestamp: new Date().toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' }),
-          actions: [
-            { label: 'View General Ledger', route: '/transactions' },
-            { label: 'Generate Trial Balance', route: '/reports' },
-          ],
-        };
-      }
+        },
+      ]);
+    } catch {
+      // The rejected case sets ai.chatError; surfaced below the transcript.
+    }
+  };
 
-      setMessages((prev) => [...prev, aiResponse]);
-      setIsTyping(false);
-    }, 700);
+  const handleDismissError = () => {
+    dispatch(clearChatError());
   };
 
   return (
@@ -140,13 +127,13 @@ export const AiAssistantView: React.FC<AiAssistantViewProps> = ({ navigate }) =>
             </h1>
           </div>
           <p className="text-xs text-slate-500 font-mono mt-1">
-            Deterministic financial analysis, statutory audit checks & natural language ledger queries
+            Natural language queries over your live accounting ledger
           </p>
         </div>
 
         <div className="flex items-center gap-2 text-xs font-mono text-emerald-800 bg-emerald-50 border border-emerald-200 px-3 py-1.5 rounded-xs">
           <ShieldCheck size={14} className="text-emerald-600" />
-          <span>Strict Zero-Hallucination Isolation</span>
+          <span>Backend AI — tenant-scoped &amp; audited</span>
         </div>
       </div>
 
@@ -158,7 +145,7 @@ export const AiAssistantView: React.FC<AiAssistantViewProps> = ({ navigate }) =>
         {suggestedPrompts.map((p, idx) => (
           <button
             key={idx}
-            onClick={() => handleSend(p)}
+            onClick={() => void handleSend(p)}
             className="text-xs bg-white border border-slate-300 hover:border-slate-950 text-slate-700 hover:text-slate-950 px-3 py-1.5 rounded-xs font-medium whitespace-nowrap transition-colors"
           >
             {p}
@@ -169,7 +156,7 @@ export const AiAssistantView: React.FC<AiAssistantViewProps> = ({ navigate }) =>
       {/* Chat Container */}
       <div className="bg-white border border-slate-200 rounded-xs flex flex-col h-[520px]">
         {/* Messages Scroll Area */}
-        <div className="flex-1 overflow-y-auto p-6 space-y-6">
+        <div ref={scrollRef} className="flex-1 overflow-y-auto p-6 space-y-6">
           {messages.map((msg) => (
             <div
               key={msg.id}
@@ -235,37 +222,66 @@ export const AiAssistantView: React.FC<AiAssistantViewProps> = ({ navigate }) =>
 
           {isTyping && (
             <div className="flex items-center gap-2 text-xs font-mono text-slate-400">
-              <Sparkles size={14} className="animate-spin text-amber-500" />
-              <span>Analyzing ledger & GST rules...</span>
+              <Loader2 size={14} className="animate-spin text-amber-500" />
+              <span>Analyzing your ledger...</span>
             </div>
           )}
         </div>
 
-        {/* Input Bar */}
-        <div className="p-4 border-t border-slate-200 bg-slate-50/60">
-          <form
-            onSubmit={(e) => {
-              e.preventDefault();
-              handleSend();
-            }}
-            className="flex items-center gap-2"
-          >
-            <input
-              type="text"
-              placeholder="Ask anything about your vouchers, GST compliance, debtor aging, or tax rules..."
-              value={inputQuery}
-              onChange={(e) => setInputQuery(e.target.value)}
-              className="flex-1 px-4 py-2.5 text-xs bg-white border border-slate-300 rounded-xs focus:outline-none focus:border-slate-900 font-sans"
-            />
+        {/* Error Banner */}
+        {chatError && (
+          <div className="px-6 py-2 bg-red-50 border-t border-red-200 text-red-800 text-xs flex items-center justify-between gap-2">
+            <span className="flex items-center gap-2">
+              <AlertCircle size={13} />
+              {chatError}
+            </span>
             <button
-              type="submit"
-              className="bg-slate-950 hover:bg-slate-800 text-white text-xs font-semibold px-4 py-2.5 rounded-xs flex items-center gap-1.5 transition-colors"
+              onClick={handleDismissError}
+              className="p-0.5 hover:text-red-950"
+              title="Dismiss"
             >
-              <span>Ask Co-Pilot</span>
-              <Send size={13} />
+              <AlertCircle size={13} />
             </button>
-          </form>
-        </div>
+          </div>
+        )}
+
+        {/* Input Area */}
+        <form
+          onSubmit={(e) => {
+            e.preventDefault();
+            void handleSend();
+          }}
+          className="p-4 border-t border-slate-200 flex items-center gap-3"
+        >
+          <input
+            type="text"
+            value={inputQuery}
+            onChange={(e) => setInputQuery(e.target.value)}
+            placeholder={
+              activeOrganizationId
+                ? 'Ask about cash, GST, receivables, anomalies…'
+                : 'Select an organization to chat with your AI co-pilot'
+            }
+            disabled={!activeOrganizationId || isTyping}
+            className="flex-1 px-4 py-2.5 border border-slate-300 rounded-xs text-xs focus:outline-none focus:border-slate-900 disabled:bg-slate-50"
+          />
+          <button
+            type="submit"
+            disabled={!inputQuery.trim() || !activeOrganizationId || isTyping}
+            className="bg-slate-950 hover:bg-slate-800 disabled:opacity-40 text-white p-2.5 rounded-xs transition-colors"
+            title="Send"
+          >
+            <Send size={15} />
+          </button>
+        </form>
+      </div>
+
+      {/* Status footer */}
+      <div className="flex items-center gap-2 text-[10px] font-mono text-slate-400">
+        <CheckCircle2 size={12} className="text-emerald-500" />
+        <span>
+          Answers are generated by the AI service from your organization's real accounting data.
+        </span>
       </div>
     </div>
   );

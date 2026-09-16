@@ -1,6 +1,11 @@
 import { createSlice, createAsyncThunk } from '@reduxjs/toolkit';
 import type { ApiError } from '../../api/types';
 import { categoriesApi } from '../../api/categoriesApi';
+import {
+  resetOnOrganizationChange,
+  selectOrganization,
+  clearOrganizations,
+} from '../organizations/organizationsSlice';
 import type {
   Category,
   CreateCategoryDto,
@@ -115,6 +120,10 @@ const categoriesSlice = createSlice({
     },
   },
   extraReducers: (builder) => {
+    // Tenant switch: drop the previous organization's categories so the
+    // expense modal can never offer another tenant's expense heads.
+    builder.addCase(selectOrganization, resetOnOrganizationChange);
+    builder.addCase(clearOrganizations, resetOnOrganizationChange);
     // List
     builder
       .addCase(fetchCategories.pending, (state) => {

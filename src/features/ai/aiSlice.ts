@@ -1,6 +1,7 @@
 import { createSlice, createAsyncThunk, PayloadAction } from '@reduxjs/toolkit';
 import { RootState } from '../../app/store';
 import { aiApi } from '../../api/aiApi';
+import { getApiErrorMessage } from '../../utils/apiErrorMessage';
 import type { AiChatResponse, AiExtractionProposal, AiAuditLog } from '../../api/aiTypes';
 
 // Define the state interface
@@ -54,7 +55,7 @@ export const chatAi = createAsyncThunk<
   try {
     return await aiApi.chatAi(organizationId, query);
   } catch (error) {
-    return rejectWithValue('Failed to get AI response');
+    return rejectWithValue(getApiErrorMessage(error, 'Failed to get AI response'));
   }
 });
 
@@ -67,7 +68,7 @@ export const extractBill = createAsyncThunk<
   try {
     return await aiApi.extractBill(organizationId, fileId);
   } catch (error) {
-    return rejectWithValue('Failed to extract bill');
+    return rejectWithValue(getApiErrorMessage(error, 'Failed to extract bill'));
   }
 });
 
@@ -89,7 +90,7 @@ export const fetchAiAuditLogs = createAsyncThunk<
 
     return { logs, hasMore };
   } catch (error) {
-    return rejectWithValue('Failed to fetch AI audit logs');
+    return rejectWithValue(getApiErrorMessage(error, 'Failed to fetch AI audit logs'));
   }
 });
 

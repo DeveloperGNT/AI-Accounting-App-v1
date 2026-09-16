@@ -3,6 +3,7 @@ import { RootState } from '../../app/store';
 import { filesApi } from '../../api/filesApi';
 import type { FileRecord, UploadFileResponse, DownloadUrlResponse, LinkFilePayload } from '../../api/filesTypes';
 import { unwrapApiResponse } from '../../api/response';
+import { getApiErrorMessage } from '../../utils/apiErrorMessage';
 
 // Define the state interface
 interface FilesState {
@@ -41,7 +42,9 @@ export const uploadFile = createAsyncThunk<
   try {
     return await filesApi.uploadFile(organizationId, file);
   } catch (error) {
-    return rejectWithValue('Failed to upload file');
+    // Surface the real backend error (bucket/storage/config failures) instead
+    // of a generic string that masks the root cause.
+    return rejectWithValue(getApiErrorMessage(error, 'Failed to upload file'));
   }
 });
 
@@ -54,7 +57,7 @@ export const fetchFileById = createAsyncThunk<
   try {
     return await filesApi.getFile(organizationId, fileId);
   } catch (error) {
-    return rejectWithValue('Failed to fetch file');
+    return rejectWithValue(getApiErrorMessage(error, 'Failed to fetch file'));
   }
 });
 
@@ -68,7 +71,7 @@ export const deleteFile = createAsyncThunk<
     await filesApi.deleteFile(organizationId, fileId);
     return fileId;
   } catch (error) {
-    return rejectWithValue('Failed to delete file');
+    return rejectWithValue(getApiErrorMessage(error, 'Failed to delete file'));
   }
 });
 
@@ -81,7 +84,7 @@ export const fetchDownloadUrl = createAsyncThunk<
   try {
     return await filesApi.getDownloadUrl(organizationId, fileId);
   } catch (error) {
-    return rejectWithValue('Failed to get download URL');
+    return rejectWithValue(getApiErrorMessage(error, 'Failed to get download URL'));
   }
 });
 
@@ -95,7 +98,7 @@ export const linkFile = createAsyncThunk<
     const response = await filesApi.linkFile(organizationId, fileId, payload);
     return { fileId, response };
   } catch (error) {
-    return rejectWithValue('Failed to link file');
+    return rejectWithValue(getApiErrorMessage(error, 'Failed to link file'));
   }
 });
 

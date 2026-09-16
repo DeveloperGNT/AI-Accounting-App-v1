@@ -1,5 +1,10 @@
 import { createAsyncThunk, createSlice } from '@reduxjs/toolkit';
 import { vendorsApi } from '../../api/vendorsApi';
+import {
+  resetOnOrganizationChange,
+  selectOrganization,
+  clearOrganizations,
+} from '../organizations/organizationsSlice';
 import type {
   Vendor,
   CreateVendorDto,
@@ -46,6 +51,9 @@ const vendorsSlice = createSlice({
   initialState,
   reducers: {},
   extraReducers: (builder) => {
+    // Tenant switch: drop the previous organization's vendors.
+    builder.addCase(selectOrganization, resetOnOrganizationChange);
+    builder.addCase(clearOrganizations, resetOnOrganizationChange);
     // CREATE
     builder.addCase(createVendor.pending, (state) => {
       state.status = 'loading';

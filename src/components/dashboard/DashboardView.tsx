@@ -1,22 +1,18 @@
-import React, { useState } from 'react';
+import React, { useMemo, useState } from 'react';
 import {
   TrendingUp,
   TrendingDown,
   AlertCircle,
-  Clock,
   ArrowUpRight,
   ArrowDownRight,
   Receipt,
   CreditCard,
-  Building,
   ScanLine,
   FileSpreadsheet,
   FileCheck2,
   ChevronRight,
-  Filter,
   CheckCircle2,
   X,
-  ExternalLink,
   Plus,
   BarChart3,
   PieChart as PieChartIcon,
@@ -38,6 +34,7 @@ import {
   ResponsiveContainer
 } from 'recharts';
 import { useAccounting } from '../../context/AccountingContext';
+import { useAppSelector } from '../../app/hooks';
 import { formatINR, formatDate } from '../../utils/formatters';
 import { Transaction } from '../../types';
 
@@ -45,12 +42,18 @@ interface DashboardViewProps {
   navigate: (route: string) => void;
 }
 
+// Every number on this dashboard is derived from real backend data already
+// loaded into Redux (invoices, expenses, customers, vendors, journal entries,
+// categories) via the AccountingContext metrics/derived lists. There are NO
+// hardcoded accounting figures: when a series has no data the chart/table
+// shows an explicit empty state instead of a fabricated trend.
 export const DashboardView: React.FC<DashboardViewProps> = ({ navigate }) => {
-  const { currentUser, currentOrg, metrics, transactions, invoices, expenses, reviewItems } = useAccounting();
+  const { currentOrg, metrics, invoices, expenses, customers, reviewItems } = useAccounting();
+  const journalState = useAppSelector((state) => state.journalEntries);
+  const categoriesState = useAppSelector((state) => state.categories);
   const [chartPeriod, setChartPeriod] = useState<'Monthly' | 'Quarterly'>('Monthly');
   const [selectedTransaction, setSelectedTransaction] = useState<Transaction | null>(null);
 
-  // Time formatted
   const todayFormatted = new Intl.DateTimeFormat('en-IN', {
     weekday: 'long',
     day: 'numeric',
@@ -58,89 +61,224 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ navigate }) => {
     year: 'numeric',
   }).format(new Date());
 
-  // Recent transactions
-  const recentTransactions = transactions.slice(0, 6);
+  // ── Recent ledger activity (real journal entries, fall back to mapped
+  // invoices/expenses when the ledger module has not been opened yet) ──
+  type LedgerRow = {
+    id: string;
+    date: string;
+    description: string;
+    type: string;
+    amount: number;
+    status: string;
+  };
 
-  // Action required items
+  const recentTransactions = useMemo<LedgerRow[]>(() => {
+    const fromJournal = journalState.items.map((je: any) => ({
+      id: je.id as string,
+      date: (je.entryDate ?? je.createdAt ?? '') as string,
+      description: (je.description || 'Journal entry') as string,
+      type: 'Journal',
+      amount: Number(
+        (je.lines ?? []).reduce(
+          (s: number, l: any) => s + Number(l.debitAmount ?? 0),
+          0,
+        ),
+      ),
+      status: String(je.status ?? 'DRAFT'),
+    }));
+
+    const fromInvoices = invoices.map((inv) => ({
+      id: inv.id,
+      date: inv.date,
+      description: `Invoice ${inv.invoiceNumber} — ${inv.customerName}`,
+      type: 'Invoice',
+      amount: inv.totalAmount,
+      status: inv.apiStatus ?? inv.status,
+    }));
+
+    const fromExpenses = expenses.map((exp) => ({
+      id: exp.id,
+      date: exp.date,
+      description: exp.description || `Expense ${exp.category}`,
+      type: 'Expense',
+      amount: exp.amount,
+      status: exp.status,
+    }));
+
+    return [...fromJournal, ...fromInvoices, ...fromExpenses]
+      .sort((a, b) => (b.date || '').localeCompare(a.date || ''))
+      .slice(0, 6);
+  }, [journalState.items, invoices, expenses]);
+
+  // ── Action Required — derived strictly from real entity states ──
+  const overdueInvoiceList = invoices.filter(
+    (i) =>
+      Boolean(i.dueDate) &&
+      i.dueDate < new Date().toISOString().slice(0, 10) &&
+      (i.apiStatus === 'FINALIZED' || i.apiStatus === 'PARTIALLY_PAID'),
+  );
+  const draftInvoicesCount = invoices.filter((i) => i.apiStatus === 'DRAFT').length;
+  const pendingExpensesCount = expenses.filter(
+    (e) => e.status === 'Pending' || e.status === 'Needs Review',
+  ).length;
+
   const actionItems = [
-    {
-      id: 'act_1',
-      title: '4 overdue customer invoices',
-      impact: '₹3,27,450 pending past payment credit terms',
-      severity: 'high',
-      route: '/sales',
-      tag: 'Receivables',
-    },
-    {
-      id: 'act_2',
-      title: `${metrics.pendingReviewCount} transactions require compliance review`,
-      impact: 'Potential duplicate NEFT & missing GSTIN vendor payment',
-      severity: 'high',
-      route: '/review',
-      tag: 'Review Queue',
-    },
-    {
-      id: 'act_3',
-      title: 'GSTR-3B Input Tax Credit (ITC) reconciliation pending',
-      impact: '₹78,420 claimable ITC ready for monthly return filing',
-      severity: 'medium',
-      route: '/gst',
-      tag: 'GST Compliance',
-    },
-    {
-      id: 'act_4',
-      title: '1 bank statement feed line unreconciled',
-      impact: 'HDFC Bank Current Account #0060 (Credit ₹65,000)',
-      severity: 'medium',
-      route: '/banking',
-      tag: 'Banking',
-    },
-    {
-      id: 'act_5',
-      title: '2 draft expenses awaiting manager approval',
-      impact: 'Professional CA retainer fees & logistics invoices',
-      severity: 'low',
-      route: '/expenses',
-      tag: 'Expenses',
-    },
+    ...(overdueInvoiceList.length > 0
+      ? [
+          {
+            id: 'act_overdue',
+            title: `${overdueInvoiceList.length} overdue customer invoice${overdueInvoiceList.length > 1 ? 's' : ''}`,
+            impact: `${formatINR(
+              overdueInvoiceList.reduce((sum, inv) => sum + inv.totalAmount, 0),
+              false,
+            )} pending past payment credit terms`,
+            severity: 'high',
+            route: '/sales',
+            tag: 'Receivables',
+          },
+        ]
+      : []),
+    ...(metrics.pendingReviewCount > 0
+      ? [
+          {
+            id: 'act_review',
+            title: `${metrics.pendingReviewCount} transactions require compliance review`,
+            impact: 'Open the review queue to accept or dismiss each item',
+            severity: 'high',
+            route: '/review',
+            tag: 'Review Queue',
+          },
+        ]
+      : []),
+    ...(draftInvoicesCount > 0
+      ? [
+          {
+            id: 'act_drafts',
+            title: `${draftInvoicesCount} draft invoice${draftInvoicesCount > 1 ? 's' : ''} awaiting finalization`,
+            impact: 'Finalize to post the journal entry and issue to the customer',
+            severity: 'medium',
+            route: '/sales',
+            tag: 'Invoicing',
+          },
+        ]
+      : []),
+    ...(pendingExpensesCount > 0
+      ? [
+          {
+            id: 'act_expenses',
+            title: `${pendingExpensesCount} expense${pendingExpensesCount > 1 ? 's' : ''} awaiting approval`,
+            impact: 'Submit, approve, and post drafts from the expense drawer',
+            severity: 'low',
+            route: '/expenses',
+            tag: 'Expenses',
+          },
+        ]
+      : []),
   ];
 
-  // Chart 1 Data: Monthly Operating Cash Trend (Line / Area)
-  const monthlyCashTrendData = [
-    { month: 'Apr 26', inflow: 1840000, outflow: 720000, netCash: 1120000 },
-    { month: 'May 26', inflow: 2100000, outflow: 790000, netCash: 1310000 },
-    { month: 'Jun 26', inflow: 1950000, outflow: 810000, netCash: 1140000 },
-    { month: 'Jul 26', inflow: 2320000, outflow: 805000, netCash: 1515000 },
-    { month: 'Aug 26', inflow: 2482400, outflow: 842100, netCash: 1640300 },
-  ];
+  // ── Chart 1: Monthly Operating Cash Trend — aggregated from real invoice
+  // (inflow proxy: invoiced revenue) and expense (outflow) dates ──
+  const monthlyCashTrendData = useMemo(() => {
+    const byMonth = new Map<string, { inflow: number; outflow: number }>();
+    const keyOf = (date: string) => (date || '').slice(0, 7); // YYYY-MM
 
-  const quarterlyCashTrendData = [
-    { month: 'Q1 (Apr-Jun)', inflow: 5890000, outflow: 2320000, netCash: 3570000 },
-    { month: 'Q2 (Jul-Sep)', inflow: 4802400, outflow: 1647100, netCash: 3155300 },
-  ];
+    invoices.forEach((inv) => {
+      if (inv.apiStatus === 'CANCELLED') return;
+      const key = keyOf(inv.date);
+      if (!key) return;
+      const bucket = byMonth.get(key) ?? { inflow: 0, outflow: 0 };
+      bucket.inflow += inv.totalAmount;
+      byMonth.set(key, bucket);
+    });
 
-  const currentCashTrend = chartPeriod === 'Monthly' ? monthlyCashTrendData : quarterlyCashTrendData;
+    expenses.forEach((exp) => {
+      const key = keyOf(exp.date);
+      if (!key) return;
+      const bucket = byMonth.get(key) ?? { inflow: 0, outflow: 0 };
+      bucket.outflow += exp.amount;
+      byMonth.set(key, bucket);
+    });
 
-  // Chart 2 Data: Revenue vs Expenses (Bar Chart)
-  const revenueExpensesData = [
-    { month: 'Apr 26', revenue: 1840000, expense: 720000 },
-    { month: 'May 26', revenue: 2100000, expense: 790000 },
-    { month: 'Jun 26', revenue: 1950000, expense: 810000 },
-    { month: 'Jul 26', revenue: 2320000, expense: 805000 },
-    { month: 'Aug 26', revenue: 2482400, expense: 842100 },
-  ];
+    return Array.from(byMonth.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, { inflow, outflow }]) => {
+        const label = new Date(`${key}-01T00:00:00`).toLocaleDateString('en-IN', {
+          month: 'short',
+          year: '2-digit',
+        });
+        return { month: label, inflow, outflow, netCash: inflow - outflow };
+      });
+  }, [invoices, expenses]);
 
-  // Chart 3 Data: Expense Breakdown (Donut Chart)
-  const expenseBreakdownData = [
-    { name: 'Payroll & Salaries', value: 450000, color: '#0f172a' },
-    { name: 'Raw Materials & COGS', value: 210000, color: '#334155' },
-    { name: 'Office & Facilities', value: 85000, color: '#64748b' },
-    { name: 'Logistics & Freight', value: 52000, color: '#94a3b8' },
-    { name: 'Software & Tech', value: 28000, color: '#cbd5e1' },
-    { name: 'Utilities & Other', value: 17100, color: '#e2e8f0' },
-  ];
+  const quarterlyCashTrendData = useMemo(() => {
+    const byQuarter = new Map<string, { inflow: number; outflow: number }>();
+    const keyOf = (date: string) => {
+      const ym = (date || '').slice(0, 7);
+      if (!ym) return '';
+      const [year, month] = ym.split('-').map(Number);
+      // Indian FY quarters: Apr–Jun, Jul–Sep, Oct–Dec, Jan–Mar
+      const quarter = Math.floor((((month - 4 + 12) % 12)) / 3) + 1;
+      return `${year}-Q${quarter}`;
+    };
+
+    invoices.forEach((inv) => {
+      if (inv.apiStatus === 'CANCELLED') return;
+      const key = keyOf(inv.date);
+      if (!key) return;
+      const bucket = byQuarter.get(key) ?? { inflow: 0, outflow: 0 };
+      bucket.inflow += inv.totalAmount;
+      byQuarter.set(key, bucket);
+    });
+
+    expenses.forEach((exp) => {
+      const key = keyOf(exp.date);
+      if (!key) return;
+      const bucket = byQuarter.get(key) ?? { inflow: 0, outflow: 0 };
+      bucket.outflow += exp.amount;
+      byQuarter.set(key, bucket);
+    });
+
+    return Array.from(byQuarter.entries())
+      .sort(([a], [b]) => a.localeCompare(b))
+      .map(([key, { inflow, outflow }]) => ({
+        month: key,
+        inflow,
+        outflow,
+        netCash: inflow - outflow,
+      }));
+  }, [invoices, expenses]);
+
+  const currentCashTrend =
+    chartPeriod === 'Monthly' ? monthlyCashTrendData : quarterlyCashTrendData;
+
+  // ── Chart 2: Revenue vs Expenses by month (real invoice/expense totals) ──
+  const revenueExpensesData = monthlyCashTrendData.map((m) => ({
+    month: m.month,
+    revenue: m.inflow,
+    expense: m.outflow,
+  }));
+
+  // ── Chart 3: Expense Breakdown — grouped by the real expense categories ──
+  const expenseBreakdownData = useMemo(() => {
+    const palette = ['#0f172a', '#334155', '#64748b', '#94a3b8', '#cbd5e1', '#e2e8f0'];
+    const byCategory = new Map<string, number>();
+    expenses.forEach((exp) => {
+      const name = exp.category || 'Other';
+      byCategory.set(name, (byCategory.get(name) ?? 0) + exp.amount);
+    });
+    return Array.from(byCategory.entries())
+      .sort((a, b) => b[1] - a[1])
+      .slice(0, 6)
+      .map(([name, value], idx) => ({ name, value, color: palette[idx % palette.length] }));
+  }, [expenses]);
 
   const totalExpenseVal = expenseBreakdownData.reduce((sum, item) => sum + item.value, 0);
+
+  // ── Dynamic card sub-stats ──
+  const pendingInvoiceCount = invoices.filter(
+    (i) => i.apiStatus === 'FINALIZED' || i.apiStatus === 'PARTIALLY_PAID',
+  ).length;
+  const largestExpenseCategory = expenseBreakdownData[0];
 
   // Custom Tooltip for Area / Bar Charts
   const CustomCurrencyTooltip = ({ active, payload, label }: any) => {
@@ -167,7 +305,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ navigate }) => {
   const CustomPieTooltip = ({ active, payload }: any) => {
     if (active && payload && payload.length) {
       const data = payload[0];
-      const pct = ((data.value / totalExpenseVal) * 100).toFixed(1);
+      const pct = totalExpenseVal > 0 ? ((data.value / totalExpenseVal) * 100).toFixed(1) : '0';
       return (
         <div className="bg-slate-950 text-white p-2.5 rounded-xs shadow-xl border border-slate-800 text-xs font-mono">
           <p className="font-bold text-slate-200 mb-1 font-sans">{data.name}</p>
@@ -194,7 +332,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ navigate }) => {
             Overview
           </h1>
           <p className="text-sm text-neutral-500 mt-0.5 font-sans">
-            {todayFormatted} • FY {currentOrg?.financialYear || '2026-27'}
+            {todayFormatted} • FY {currentOrg?.financialYear || ''}
           </p>
         </div>
 
@@ -237,9 +375,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ navigate }) => {
           <h3 className="text-2xl font-light text-neutral-900 font-mono">
             {formatINR(metrics.revenue, false)}
           </h3>
-          <p className="mt-2 text-[10px] font-bold text-emerald-700 uppercase tracking-tight flex items-center gap-1">
+          <p className="mt-2 text-[10px] font-bold text-neutral-500 uppercase tracking-tight flex items-center gap-1">
             <TrendingUp size={11} />
-            <span>+12.4% vs prev period</span>
+            <span>{invoices.length} invoices issued</span>
           </p>
         </div>
 
@@ -252,7 +390,9 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ navigate }) => {
             {formatINR(metrics.expenses, false)}
           </h3>
           <p className="mt-2 text-[10px] font-bold text-neutral-500 uppercase tracking-tight font-mono">
-            ₹4.5L Payroll incl.
+            {largestExpenseCategory
+              ? `${largestExpenseCategory.name} leads at ${formatINR(largestExpenseCategory.value, false)}`
+              : `${expenses.length} expenses recorded`}
           </p>
         </div>
 
@@ -271,21 +411,31 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ navigate }) => {
             {formatINR(metrics.receivables, false)}
           </h3>
           <p className="mt-2 text-[10px] font-bold text-amber-700 uppercase tracking-tight">
-            4 Invoices Pending
+            {pendingInvoiceCount} Invoice{pendingInvoiceCount === 1 ? '' : 's'} Pending
           </p>
         </div>
 
-        {/* Cash & Bank Balance */}
+        {/* Net Profit */}
         <div className="bg-white p-6 border border-neutral-200 rounded-xs">
-          <p className="text-[10px] font-bold text-neutral-400 uppercase tracking-widest mb-1">
-            Cash & Liquid Funds
-          </p>
-          <h3 className="text-2xl font-light text-neutral-900 font-mono">
-            {formatINR(metrics.cashAndBank, false)}
+          <div className="flex items-center justify-between">
+            <p className="text-[10px] font-bold text-neutral-400 uppercase tracking-widest mb-1">
+              Net Position
+            </p>
+            {metrics.netProfit >= 0 ? (
+              <ArrowUpRight size={12} className="text-emerald-600" />
+            ) : (
+              <ArrowDownRight size={12} className="text-red-600" />
+            )}
+          </div>
+          <h3
+            className={`text-2xl font-light font-mono ${
+              metrics.netProfit >= 0 ? 'text-emerald-700' : 'text-red-700'
+            }`}
+          >
+            {formatINR(metrics.netProfit, false)}
           </h3>
-          <p className="mt-2 text-[10px] font-bold text-emerald-700 uppercase tracking-tight flex items-center gap-1">
-            <span className="w-1.5 h-1.5 rounded-full bg-emerald-500"></span>
-            <span>All Bank A/cs Reconciled</span>
+          <p className="mt-2 text-[10px] font-bold text-neutral-500 uppercase tracking-tight">
+            {customers.length} active customers
           </p>
         </div>
       </div>
@@ -299,11 +449,11 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ navigate }) => {
               <div className="flex items-center gap-2">
                 <Activity size={15} className="text-slate-800" />
                 <h2 className="text-xs font-bold uppercase tracking-widest text-slate-900">
-                  Monthly Operating Cash Trend
+                  Operating Cash Trend
                 </h2>
               </div>
               <p className="text-[11px] text-slate-500 font-mono mt-0.5">
-                Inflow vs Outflow & Net Operating Liquidity
+                Invoiced revenue vs recorded expenses
               </p>
             </div>
 
@@ -330,58 +480,70 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ navigate }) => {
           </div>
 
           <div className="h-64 w-full pt-2">
-            <ResponsiveContainer width="100%" height="100%">
-              <AreaChart data={currentCashTrend} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
-                <defs>
-                  <linearGradient id="inflowGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#0f172a" stopOpacity={0.25} />
-                    <stop offset="95%" stopColor="#0f172a" stopOpacity={0.0} />
-                  </linearGradient>
-                  <linearGradient id="outflowGrad" x1="0" y1="0" x2="0" y2="1">
-                    <stop offset="5%" stopColor="#94a3b8" stopOpacity={0.25} />
-                    <stop offset="95%" stopColor="#94a3b8" stopOpacity={0.0} />
-                  </linearGradient>
-                </defs>
-                <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
-                <XAxis
-                  dataKey="month"
-                  tick={{ fontSize: 11, fill: '#64748b', fontFamily: 'monospace' }}
-                  axisLine={{ stroke: '#e2e8f0' }}
-                  tickLine={false}
-                />
-                <YAxis
-                  tick={{ fontSize: 10, fill: '#64748b', fontFamily: 'monospace' }}
-                  axisLine={false}
-                  tickLine={false}
-                  tickFormatter={(val) => `₹${(val / 100000).toFixed(1)}L`}
-                  width={60}
-                />
-                <Tooltip content={<CustomCurrencyTooltip />} />
-                <Legend
-                  wrapperStyle={{ paddingTop: 10, fontSize: 11, fontFamily: 'monospace' }}
-                  iconType="circle"
-                  iconSize={8}
-                />
-                <Area
-                  type="monotone"
-                  dataKey="inflow"
-                  name="Cash Inflow"
-                  stroke="#0f172a"
-                  strokeWidth={2}
-                  fillOpacity={1}
-                  fill="url(#inflowGrad)"
-                />
-                <Area
-                  type="monotone"
-                  dataKey="outflow"
-                  name="Cash Outflow"
-                  stroke="#94a3b8"
-                  strokeWidth={2}
-                  fillOpacity={1}
-                  fill="url(#outflowGrad)"
-                />
-              </AreaChart>
-            </ResponsiveContainer>
+            {currentCashTrend.length === 0 ? (
+              <div className="h-full flex flex-col items-center justify-center text-center gap-2">
+                <BarChart3 size={22} className="text-slate-300" />
+                <p className="text-xs font-mono text-slate-400">
+                  No invoicing or expense activity yet.
+                </p>
+                <p className="text-[10px] text-slate-400 font-mono">
+                  Create an invoice or record an expense to build this trend.
+                </p>
+              </div>
+            ) : (
+              <ResponsiveContainer width="100%" height="100%">
+                <AreaChart data={currentCashTrend} margin={{ top: 10, right: 10, left: 0, bottom: 0 }}>
+                  <defs>
+                    <linearGradient id="inflowGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#0f172a" stopOpacity={0.25} />
+                      <stop offset="95%" stopColor="#0f172a" stopOpacity={0.0} />
+                    </linearGradient>
+                    <linearGradient id="outflowGrad" x1="0" y1="0" x2="0" y2="1">
+                      <stop offset="5%" stopColor="#94a3b8" stopOpacity={0.25} />
+                      <stop offset="95%" stopColor="#94a3b8" stopOpacity={0.0} />
+                    </linearGradient>
+                  </defs>
+                  <CartesianGrid strokeDasharray="3 3" stroke="#f1f5f9" vertical={false} />
+                  <XAxis
+                    dataKey="month"
+                    tick={{ fontSize: 11, fill: '#64748b', fontFamily: 'monospace' }}
+                    axisLine={{ stroke: '#e2e8f0' }}
+                    tickLine={false}
+                  />
+                  <YAxis
+                    tick={{ fontSize: 10, fill: '#64748b', fontFamily: 'monospace' }}
+                    axisLine={false}
+                    tickLine={false}
+                    tickFormatter={(val) => `₹${(val / 100000).toFixed(1)}L`}
+                    width={60}
+                  />
+                  <Tooltip content={<CustomCurrencyTooltip />} />
+                  <Legend
+                    wrapperStyle={{ paddingTop: 10, fontSize: 11, fontFamily: 'monospace' }}
+                    iconType="circle"
+                    iconSize={8}
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="inflow"
+                    name="Invoiced"
+                    stroke="#0f172a"
+                    strokeWidth={2}
+                    fillOpacity={1}
+                    fill="url(#inflowGrad)"
+                  />
+                  <Area
+                    type="monotone"
+                    dataKey="outflow"
+                    name="Expenses"
+                    stroke="#94a3b8"
+                    strokeWidth={2}
+                    fillOpacity={1}
+                    fill="url(#outflowGrad)"
+                  />
+                </AreaChart>
+              </ResponsiveContainer>
+            )}
           </div>
         </div>
 
@@ -395,57 +557,67 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ navigate }) => {
               </h2>
             </div>
             <p className="text-[11px] text-slate-500 font-mono mt-0.5">
-              Operating cost categorization (FY 2026-27)
+              By real expense categories
+              {currentOrg?.financialYear ? ` (${currentOrg.financialYear})` : ''}
             </p>
           </div>
 
-          <div className="h-48 w-full relative flex items-center justify-center">
-            <ResponsiveContainer width="100%" height="100%">
-              <PieChart>
-                <Pie
-                  data={expenseBreakdownData}
-                  cx="50%"
-                  cy="50%"
-                  innerRadius={48}
-                  outerRadius={72}
-                  paddingAngle={2}
-                  dataKey="value"
-                >
-                  {expenseBreakdownData.map((entry, index) => (
-                    <Cell key={`cell-${index}`} fill={entry.color} stroke="#ffffff" strokeWidth={1} />
-                  ))}
-                </Pie>
-                <Tooltip content={<CustomPieTooltip />} />
-              </PieChart>
-            </ResponsiveContainer>
-            <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
-              <span className="text-[10px] font-mono uppercase text-slate-400">Total</span>
-              <span className="text-xs font-bold font-mono text-slate-900">{formatINR(totalExpenseVal, false)}</span>
+          {expenseBreakdownData.length === 0 ? (
+            <div className="h-48 flex flex-col items-center justify-center text-center gap-2">
+              <PieChartIcon size={22} className="text-slate-300" />
+              <p className="text-xs font-mono text-slate-400">No expenses recorded yet.</p>
             </div>
-          </div>
-
-          {/* Clean minimal legend list */}
-          <div className="space-y-1.5 pt-2 border-t border-neutral-100 text-xs">
-            {expenseBreakdownData.slice(0, 4).map((item, idx) => (
-              <div key={idx} className="flex items-center justify-between text-[11px] font-mono">
-                <span className="flex items-center gap-1.5 text-slate-600 truncate">
-                  <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: item.color }}></span>
-                  <span className="truncate">{item.name}</span>
-                </span>
-                <span className="font-semibold text-slate-900 shrink-0">{formatINR(item.value)}</span>
+          ) : (
+            <>
+              <div className="h-48 w-full relative flex items-center justify-center">
+                <ResponsiveContainer width="100%" height="100%">
+                  <PieChart>
+                    <Pie
+                      data={expenseBreakdownData}
+                      cx="50%"
+                      cy="50%"
+                      innerRadius={48}
+                      outerRadius={72}
+                      paddingAngle={2}
+                      dataKey="value"
+                    >
+                      {expenseBreakdownData.map((entry, index) => (
+                        <Cell key={`cell-${index}`} fill={entry.color} stroke="#ffffff" strokeWidth={1} />
+                      ))}
+                    </Pie>
+                    <Tooltip content={<CustomPieTooltip />} />
+                  </PieChart>
+                </ResponsiveContainer>
+                <div className="absolute inset-0 flex flex-col items-center justify-center pointer-events-none">
+                  <span className="text-[10px] font-mono uppercase text-slate-400">Total</span>
+                  <span className="text-xs font-bold font-mono text-slate-900">{formatINR(totalExpenseVal, false)}</span>
+                </div>
               </div>
-            ))}
-          </div>
+
+              {/* Clean minimal legend list */}
+              <div className="space-y-1.5 pt-2 border-t border-neutral-100 text-xs">
+                {expenseBreakdownData.slice(0, 4).map((item, idx) => (
+                  <div key={idx} className="flex items-center justify-between text-[11px] font-mono">
+                    <span className="flex items-center gap-1.5 text-slate-600 truncate">
+                      <span className="w-2 h-2 rounded-full shrink-0" style={{ backgroundColor: item.color }}></span>
+                      <span className="truncate">{item.name}</span>
+                    </span>
+                    <span className="font-semibold text-slate-900 shrink-0">{formatINR(item.value)}</span>
+                  </div>
+                ))}
+              </div>
+            </>
+          )}
         </div>
       </div>
 
       {/* Main Content Grid: Transactions Table (Left 2 cols) & Action / Compliance Box (Right 1 col) */}
       <div className="grid grid-cols-1 lg:grid-cols-3 gap-6">
-        {/* Left 2 cols: Recent Transactions Table */}
+        {/* Left 2 cols: Recent Ledger Table */}
         <div className="lg:col-span-2 bg-white border border-neutral-200 rounded-xs flex flex-col overflow-hidden">
           <div className="p-4 border-b border-neutral-100 flex justify-between items-center bg-neutral-50">
             <h2 className="text-xs font-bold uppercase tracking-widest text-neutral-600">
-              Recent Ledger Transactions
+              Recent Ledger Activity
             </h2>
             <button
               onClick={() => navigate('/transactions')}
@@ -460,53 +632,71 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ navigate }) => {
               <thead>
                 <tr className="border-b border-neutral-100 text-[10px] uppercase tracking-widest text-neutral-400 font-bold">
                   <th className="px-4 py-3">Date</th>
-                  <th className="px-4 py-3">Description & Party</th>
+                  <th className="px-4 py-3">Description</th>
                   <th className="px-4 py-3">Type</th>
                   <th className="px-4 py-3 text-right">Amount</th>
                   <th className="px-4 py-3 text-center">Status</th>
                 </tr>
               </thead>
               <tbody className="divide-y divide-neutral-50">
-                {recentTransactions.map((tx) => (
-                  <tr
-                    key={tx.id}
-                    onClick={() => setSelectedTransaction(tx)}
-                    className="hover:bg-neutral-50 cursor-pointer transition-colors"
-                  >
-                    <td className="px-4 py-3 font-mono text-neutral-500 whitespace-nowrap">
-                      {formatDate(tx.date)}
-                    </td>
-                    <td className="px-4 py-3 font-medium text-neutral-900 max-w-xs truncate">
-                      <div className="truncate font-semibold">{tx.description}</div>
-                      {tx.partyName && (
-                        <div className="text-[10px] text-neutral-500 font-normal truncate">
-                          {tx.partyName} {tx.partyGstin ? `• ${tx.partyGstin}` : ''}
-                        </div>
-                      )}
-                    </td>
-                    <td className="px-4 py-3">
-                      <span className="text-[10px] font-mono text-neutral-700 bg-neutral-100 px-1.5 py-0.5 rounded-xs">
-                        {tx.type}
-                      </span>
-                    </td>
-                    <td className="px-4 py-3 text-right font-mono font-semibold text-neutral-900 whitespace-nowrap">
-                      {formatINR(tx.amount)}
-                    </td>
-                    <td className="px-4 py-3 text-center whitespace-nowrap">
-                      <span
-                        className={`inline-block px-2 py-0.5 font-bold uppercase text-[9px] tracking-tight rounded-xs ${
-                          tx.status === 'Paid' || tx.status === 'Reconciled'
-                            ? 'bg-emerald-100 text-emerald-800'
-                            : tx.status === 'Pending Review'
-                            ? 'bg-amber-100 text-amber-800'
-                            : 'bg-neutral-100 text-neutral-700'
-                        }`}
-                      >
-                        {tx.status}
-                      </span>
+                {recentTransactions.length === 0 ? (
+                  <tr>
+                    <td colSpan={5} className="px-4 py-10 text-center text-slate-400 text-xs font-mono">
+                      No ledger activity yet. Create an invoice or expense to get started.
                     </td>
                   </tr>
-                ))}
+                ) : (
+                  recentTransactions.map((tx) => (
+                    <tr
+                      key={tx.id}
+                      className="hover:bg-neutral-50 cursor-pointer transition-colors"
+                      onClick={() =>
+                        setSelectedTransaction({
+                          id: tx.id,
+                          orgId: currentOrg?.id ?? '',
+                          date: tx.date,
+                          description: tx.description,
+                          type: 'Receipt',
+                          partyName: tx.description,
+                          amount: tx.amount,
+                          taxableAmount: tx.amount,
+                          gstAmount: 0,
+                          gstRate: 0,
+                          status: 'Categorized',
+                          account: '—',
+                        })
+                      }
+                    >
+                      <td className="px-4 py-3 font-mono text-neutral-500 whitespace-nowrap">
+                        {formatDate(tx.date)}
+                      </td>
+                      <td className="px-4 py-3 font-medium text-neutral-900 max-w-xs truncate">
+                        <div className="truncate font-semibold">{tx.description}</div>
+                      </td>
+                      <td className="px-4 py-3">
+                        <span className="text-[10px] font-mono text-neutral-700 bg-neutral-100 px-1.5 py-0.5 rounded-xs">
+                          {tx.type}
+                        </span>
+                      </td>
+                      <td className="px-4 py-3 text-right font-mono font-semibold text-neutral-900 whitespace-nowrap">
+                        {formatINR(tx.amount)}
+                      </td>
+                      <td className="px-4 py-3 text-center whitespace-nowrap">
+                        <span
+                          className={`inline-block px-2 py-0.5 font-bold uppercase text-[9px] tracking-tight rounded-xs ${
+                            tx.status === 'PAID' || tx.status === 'Paid' || tx.status === 'POSTED'
+                              ? 'bg-emerald-100 text-emerald-800'
+                              : tx.status === 'DRAFT'
+                              ? 'bg-neutral-100 text-neutral-700'
+                              : 'bg-amber-100 text-amber-800'
+                          }`}
+                        >
+                          {tx.status}
+                        </span>
+                      </td>
+                    </tr>
+                  ))
+                )}
               </tbody>
             </table>
           </div>
@@ -518,45 +708,55 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ navigate }) => {
                 <span className="text-[10px] font-bold text-neutral-400 uppercase tracking-widest">
                   Monthly Revenue vs Operating Expenses
                 </span>
-                <span className="text-[10px] text-neutral-500 font-mono ml-2">
-                  (FY {currentOrg?.financialYear || '2026-27'})
-                </span>
+                {currentOrg?.financialYear && (
+                  <span className="text-[10px] text-neutral-500 font-mono ml-2">
+                    (FY {currentOrg.financialYear})
+                  </span>
+                )}
               </div>
             </div>
             <div className="h-44 w-full">
-              <ResponsiveContainer width="100%" height="100%">
-                <BarChart data={revenueExpensesData} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
-                  <CartesianGrid strokeDasharray="3 3" stroke="#f8fafc" vertical={false} />
-                  <XAxis
-                    dataKey="month"
-                    tick={{ fontSize: 10, fill: '#64748b', fontFamily: 'monospace' }}
-                    axisLine={{ stroke: '#e2e8f0' }}
-                    tickLine={false}
-                  />
-                  <YAxis
-                    tick={{ fontSize: 10, fill: '#64748b', fontFamily: 'monospace' }}
-                    axisLine={false}
-                    tickLine={false}
-                    tickFormatter={(val) => `₹${(val / 100000).toFixed(0)}L`}
-                    width={50}
-                  />
-                  <Tooltip content={<CustomCurrencyTooltip />} />
-                  <Legend
-                    wrapperStyle={{ paddingTop: 6, fontSize: 11, fontFamily: 'monospace' }}
-                    iconType="rect"
-                    iconSize={10}
-                  />
-                  <Bar dataKey="revenue" name="Revenue" fill="#0f172a" radius={[2, 2, 0, 0]} />
-                  <Bar dataKey="expense" name="Expenses" fill="#94a3b8" radius={[2, 2, 0, 0]} />
-                </BarChart>
-              </ResponsiveContainer>
+              {revenueExpensesData.length === 0 ? (
+                <div className="h-full flex flex-col items-center justify-center text-center gap-2">
+                  <BarChart3 size={20} className="text-slate-300" />
+                  <p className="text-xs font-mono text-slate-400">
+                    Not enough ledger activity to chart yet.
+                  </p>
+                </div>
+              ) : (
+                <ResponsiveContainer width="100%" height="100%">
+                  <BarChart data={revenueExpensesData} margin={{ top: 5, right: 10, left: 0, bottom: 0 }}>
+                    <CartesianGrid strokeDasharray="3 3" stroke="#f8fafc" vertical={false} />
+                    <XAxis
+                      dataKey="month"
+                      tick={{ fontSize: 10, fill: '#64748b', fontFamily: 'monospace' }}
+                      axisLine={{ stroke: '#e2e8f0' }}
+                      tickLine={false}
+                    />
+                    <YAxis
+                      tick={{ fontSize: 10, fill: '#64748b', fontFamily: 'monospace' }}
+                      axisLine={false}
+                      tickLine={false}
+                      tickFormatter={(val) => `₹${(val / 100000).toFixed(0)}L`}
+                      width={50}
+                    />
+                    <Tooltip content={<CustomCurrencyTooltip />} />
+                    <Legend
+                      wrapperStyle={{ paddingTop: 6, fontSize: 11, fontFamily: 'monospace' }}
+                      iconType="rect"
+                      iconSize={10}
+                    />
+                    <Bar dataKey="revenue" name="Revenue" fill="#0f172a" radius={[2, 2, 0, 0]} />
+                    <Bar dataKey="expense" name="Expenses" fill="#94a3b8" radius={[2, 2, 0, 0]} />
+                  </BarChart>
+                </ResponsiveContainer>
+              )}
             </div>
           </div>
         </div>
 
-        {/* Right 1 col: Action Required & Compliance Intelligence */}
+        {/* Right 1 col: Action Required */}
         <div className="flex flex-col space-y-6">
-          {/* Action Required Card */}
           <div className="bg-white p-5 border border-neutral-200 rounded-xs flex-1 flex flex-col">
             <h2 className="text-xs font-bold uppercase tracking-widest text-neutral-600 mb-4 flex items-center justify-between">
               <div className="flex items-center">
@@ -569,23 +769,32 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ navigate }) => {
             </h2>
 
             <div className="space-y-4 flex-1">
-              {actionItems.map((item) => (
-                <div
-                  key={item.id}
-                  className="flex items-start justify-between border-b border-neutral-100 pb-3 last:border-0 last:pb-0"
-                >
-                  <div className="pr-3">
-                    <p className="text-xs font-bold text-neutral-900">{item.title}</p>
-                    <p className="text-[10px] text-neutral-500 mt-0.5">{item.impact}</p>
-                  </div>
-                  <button
-                    onClick={() => navigate(item.route)}
-                    className="text-[10px] font-bold text-blue-600 uppercase hover:underline shrink-0"
-                  >
-                    Resolve
-                  </button>
+              {actionItems.length === 0 ? (
+                <div className="flex flex-col items-center justify-center gap-2 py-8 text-center">
+                  <CheckCircle2 size={20} className="text-emerald-500" />
+                  <p className="text-xs font-mono text-slate-400">
+                    Nothing needs attention right now.
+                  </p>
                 </div>
-              ))}
+              ) : (
+                actionItems.map((item) => (
+                  <div
+                    key={item.id}
+                    className="flex items-start justify-between border-b border-neutral-100 pb-3 last:border-0 last:pb-0"
+                  >
+                    <div className="pr-3">
+                      <p className="text-xs font-bold text-neutral-900">{item.title}</p>
+                      <p className="text-[10px] text-neutral-500 mt-0.5">{item.impact}</p>
+                    </div>
+                    <button
+                      onClick={() => navigate(item.route)}
+                      className="text-[10px] font-bold text-blue-600 uppercase hover:underline shrink-0"
+                    >
+                      Resolve
+                    </button>
+                  </div>
+                ))
+              )}
             </div>
 
             <div className="pt-3 mt-3 border-t border-neutral-100">
@@ -605,19 +814,21 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ navigate }) => {
               <span>Statutory Compliance Intelligence</span>
             </p>
             <p className="text-xs leading-relaxed text-neutral-300 font-sans">
-              "Accounts receivable increased 14% this month. Invoices for CloudTech and Beta Labs are approaching 30 days overdue. Recommended action: send payment reminders."
+              {metrics.gstNetPayable > 0
+                ? `Estimated net GST payable of ${formatINR(metrics.gstNetPayable, false)} is accumulating this period. Review the GST hub before filing.`
+                : 'No net GST liability is currently accumulating on recorded activity.'}
             </p>
             <button
-              onClick={() => navigate('/insights')}
+              onClick={() => navigate('/gst')}
               className="mt-3 text-[9px] font-bold uppercase tracking-widest border border-neutral-700 px-3 py-1.5 hover:bg-neutral-800 text-neutral-200 transition-colors inline-block rounded-xs"
             >
-              View Financial Analysis →
+              Open GST Hub →
             </button>
           </div>
         </div>
       </div>
 
-      {/* Transaction Detail Slide-out Drawer */}
+      {/* Simple detail drawer for ledger rows (no fake journal lines) */}
       {selectedTransaction && (
         <div className="fixed inset-0 z-50 overflow-hidden">
           <div
@@ -629,10 +840,10 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ navigate }) => {
               <div className="px-6 py-4 border-b border-neutral-200 flex items-center justify-between">
                 <div>
                   <h3 className="text-xs font-bold uppercase tracking-widest text-neutral-900 font-mono">
-                    Voucher Detail • {selectedTransaction.id}
+                    Ledger Entry Detail
                   </h3>
                   <p className="text-xs text-neutral-500 font-mono">
-                    Posted on {formatDate(selectedTransaction.date)}
+                    {formatDate(selectedTransaction.date)}
                   </p>
                 </div>
                 <button
@@ -655,72 +866,19 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ navigate }) => {
                     {selectedTransaction.description}
                   </div>
                 </div>
-
-                {selectedTransaction.isAiFlagged && (
-                  <div className="p-3 bg-amber-50 border border-amber-200 text-amber-900 rounded-xs">
-                    <div className="font-bold flex items-center gap-1.5 text-xs">
-                      <AlertCircle size={14} className="text-amber-700" />
-                      <span>Audit Review Flag</span>
-                    </div>
-                    <p className="text-[11px] mt-1 font-sans">
-                      {selectedTransaction.aiFlagReason}
-                    </p>
-                  </div>
-                )}
-
                 <div className="space-y-2.5 font-mono text-xs">
                   <div className="flex justify-between border-b border-neutral-100 pb-1.5">
-                    <span className="text-neutral-500 font-sans">Voucher Type:</span>
+                    <span className="text-neutral-500 font-sans">Record Type:</span>
                     <span className="font-bold text-neutral-900">{selectedTransaction.type}</span>
                   </div>
                   <div className="flex justify-between border-b border-neutral-100 pb-1.5">
-                    <span className="text-neutral-500 font-sans">Counterparty:</span>
-                    <span className="text-neutral-900 font-semibold">{selectedTransaction.partyName}</span>
-                  </div>
-                  {selectedTransaction.partyGstin && (
-                    <div className="flex justify-between border-b border-neutral-100 pb-1.5">
-                      <span className="text-neutral-500 font-sans">Party GSTIN:</span>
-                      <span className="text-neutral-900">{selectedTransaction.partyGstin}</span>
-                    </div>
-                  )}
-                  <div className="flex justify-between border-b border-neutral-100 pb-1.5">
-                    <span className="text-neutral-500 font-sans">Taxable Base Value:</span>
-                    <span className="text-neutral-900">{formatINR(selectedTransaction.taxableAmount)}</span>
-                  </div>
-                  <div className="flex justify-between border-b border-neutral-100 pb-1.5">
-                    <span className="text-neutral-500 font-sans">GST Rate & Tax:</span>
-                    <span className="text-neutral-900">
-                      {selectedTransaction.gstRate}% ({formatINR(selectedTransaction.gstAmount)})
-                    </span>
-                  </div>
-                  <div className="flex justify-between border-b border-neutral-100 pb-1.5">
-                    <span className="text-neutral-500 font-sans">Account Debited/Credited:</span>
-                    <span className="text-neutral-900">{selectedTransaction.account}</span>
-                  </div>
-                  {selectedTransaction.referenceNo && (
-                    <div className="flex justify-between border-b border-neutral-100 pb-1.5">
-                      <span className="text-neutral-500 font-sans">Reference / Bill No:</span>
-                      <span className="text-neutral-900">{selectedTransaction.referenceNo}</span>
-                    </div>
-                  )}
-                </div>
-
-                {/* Double-Entry Journal Posting */}
-                <div className="mt-4 pt-4 border-t border-neutral-200">
-                  <div className="text-[10px] font-bold uppercase tracking-widest text-neutral-400 mb-2">
-                    Double-Entry Journal Posting
-                  </div>
-                  <div className="bg-neutral-900 text-neutral-200 p-3 font-mono text-[11px] space-y-1 rounded-xs">
-                    <div className="flex justify-between">
-                      <span>Dr. {selectedTransaction.partyName} Ledger</span>
-                      <span>{formatINR(selectedTransaction.amount)}</span>
-                    </div>
-                    <div className="flex justify-between text-neutral-400 pl-4">
-                      <span>Cr. {selectedTransaction.account}</span>
-                      <span>{formatINR(selectedTransaction.amount)}</span>
-                    </div>
+                    <span className="text-neutral-500 font-sans">Status:</span>
+                    <span className="text-neutral-900 font-semibold">{selectedTransaction.status}</span>
                   </div>
                 </div>
+                <p className="text-[10px] text-slate-400 font-mono">
+                  Full double-entry details are available in Transactions → Journal.
+                </p>
               </div>
 
               <div className="p-4 border-t border-neutral-200 bg-neutral-50 flex items-center justify-between">
@@ -728,7 +886,7 @@ export const DashboardView: React.FC<DashboardViewProps> = ({ navigate }) => {
                   onClick={() => setSelectedTransaction(null)}
                   className="px-4 py-2 bg-neutral-900 text-white hover:bg-neutral-800 text-xs font-bold uppercase tracking-widest w-full transition-colors rounded-xs"
                 >
-                  Close Voucher View
+                  Close
                 </button>
               </div>
             </div>

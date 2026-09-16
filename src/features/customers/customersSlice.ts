@@ -1,5 +1,10 @@
 import { createAsyncThunk, createSlice } from '@reduxjs/toolkit';
 import { customersApi } from '../../api/customersApi';
+import {
+  resetOnOrganizationChange,
+  selectOrganization,
+  clearOrganizations,
+} from '../organizations/organizationsSlice';
 import type { Customer, CreateCustomerDto, UpdateCustomerDto, CustomerListResponse, DeleteCustomerResponse } from '../../api/customersTypes';
 
 export interface CustomersState {
@@ -41,6 +46,9 @@ const customersSlice = createSlice({
   initialState,
   reducers: {},
   extraReducers: (builder) => {
+    // Tenant switch: drop the previous organization's customers.
+    builder.addCase(selectOrganization, resetOnOrganizationChange);
+    builder.addCase(clearOrganizations, resetOnOrganizationChange);
     // Create
     builder.addCase(createCustomer.pending, (state) => {
       state.status = 'loading';

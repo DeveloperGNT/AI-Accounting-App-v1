@@ -1,6 +1,6 @@
 import { apiClient } from '../lib/axiosInstance';
 import { unwrapApiResponse } from '../api/response';
-import type { OrganizationResponse, UserProfile } from '../types';
+import type { OrganizationResponse, UserProfile } from './types';
 
 // Admin Organization APIs
 export const adminApi = {

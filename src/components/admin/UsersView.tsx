@@ -123,9 +123,9 @@ export const UsersView: React.FC<UsersViewProps> = ({ navigate }) => {
                       <p className="text-xs text-slate-500 font-mono truncate">
                         ID: {user.id.substring(0, 8)}...
                       </p>
-                      {user.email && (
+                      {(user as UserProfile & { email?: string }).email && (
                         <p className="text-xs text-slate-400 font-mono mt-0.5">
-                          {user.email}
+                          {(user as UserProfile & { email?: string }).email}
                         </p>
                       )}
                     </div>

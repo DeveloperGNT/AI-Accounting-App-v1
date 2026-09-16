@@ -221,20 +221,24 @@ export const {
 } = adminSlice.actions;
 
 // Selectors
-export const selectAllOrganizations = (state: { admin: typeof adminSlice }) => state.admin.organizations;
-export const selectOrganizationsStatus = (state: { admin: typeof adminSlice }) => state.admin.organizationStatus;
-export const selectOrganizationsError = (state: { admin: typeof adminSlice }) => state.admin.organizationError;
+interface AdminRootState {
+  admin: AdminState;
+}
 
-export const selectAllUsers = (state: { admin: typeof adminSlice }) => state.admin.users;
-export const selectUsersStatus = (state: { admin: typeof adminSlice }) => state.admin.usersStatus;
-export const selectUsersError = (state: { admin: typeof adminSlice }) => state.admin.usersError;
+export const selectAllOrganizations = (state: AdminRootState) => state.admin.organizations;
+export const selectOrganizationsStatus = (state: AdminRootState) => state.admin.organizationStatus;
+export const selectOrganizationsError = (state: AdminRootState) => state.admin.organizationError;
 
-export const selectSelectedOrganization = (state: { admin: typeof adminSlice }) => state.admin.selectedOrganization;
-export const selectSelectedOrganizationStatus = (state: { admin: typeof adminSlice }) => state.admin.selectedOrganizationStatus;
-export const selectSelectedOrganizationError = (state: { admin: typeof adminSlice }) => state.admin.selectedOrganizationError;
+export const selectAllUsers = (state: AdminRootState) => state.admin.users;
+export const selectUsersStatus = (state: AdminRootState) => state.admin.usersStatus;
+export const selectUsersError = (state: AdminRootState) => state.admin.usersError;
 
-export const selectSelectedUser = (state: { admin: typeof adminSlice }) => state.admin.selectedUser;
-export const selectSelectedUserStatus = (state: { admin: typeof adminSlice }) => state.admin.selectedUserStatus;
-export const selectSelectedUserError = (state: { admin: typeof adminSlice }) => state.admin.selectedUserError;
+export const selectSelectedOrganization = (state: AdminRootState) => state.admin.selectedOrganization;
+export const selectSelectedOrganizationStatus = (state: AdminRootState) => state.admin.selectedOrganizationStatus;
+export const selectSelectedOrganizationError = (state: AdminRootState) => state.admin.selectedOrganizationError;
+
+export const selectSelectedUser = (state: AdminRootState) => state.admin.selectedUser;
+export const selectSelectedUserStatus = (state: AdminRootState) => state.admin.selectedUserStatus;
+export const selectSelectedUserError = (state: AdminRootState) => state.admin.selectedUserError;
 
 export default adminSlice.reducer;

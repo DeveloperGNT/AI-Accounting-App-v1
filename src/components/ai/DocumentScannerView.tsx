@@ -1,19 +1,16 @@
-import React, { useState, useRef } from 'react';
+import React, { useEffect, useMemo, useState } from 'react';
 import {
   UploadCloud,
   FileText,
   CheckCircle2,
   AlertCircle,
+  AlertTriangle,
   ArrowRight,
-  RefreshCw,
-  X,
-  FileCheck,
   ScanLine,
   ShieldCheck,
-  Edit3,
-  Receipt,
-  FileSpreadsheet,
-  Check
+  Plus,
+  Trash2,
+  Info,
 } from 'lucide-react';
 import { useAccounting } from '../../context/AccountingContext';
 import { useAppDispatch, useAppSelector } from '../../app/hooks';
@@ -22,83 +19,203 @@ import { uploadFile } from '../../features/files/filesSlice';
 import { extractBill } from '../../features/ai/aiSlice';
 import { getApiErrorMessage } from '../../utils/apiErrorMessage';
 import { formatINR } from '../../utils/formatters';
-import type { RootState } from '../../app/store';
-import type { UploadFileResponse } from '../../api/filesTypes';
-import type { AiExtractionProposal, ExtractedBillResponseDto } from '../../api/aiTypes';
+import type {
+  AiExtractionProposal,
+  ExtractionWarning,
+  FieldConfidence,
+} from '../../api/aiTypes';
+import type { CreatePurchaseBillDto } from '../../api/purchasesTypes';
 
 interface DocumentScannerViewProps {
   navigate: (route: string) => void;
 }
 
-interface ExtractedBillData {
+/** Editable review model built from the AI proposal (proposal data only). */
+interface ReviewItem {
+  description: string;
+  hsn: string;
+  quantity: number;
+  unit: string;
+  unitPrice: number;
+  discount: number;
+  taxRate: number;
+  taxableAmount: number;
+  itcEligible: boolean;
+}
+
+interface ReviewModel {
   fileName: string;
   fileSize: string;
-  vendorName: string;
-  vendorGstin: string;
+  supplierName: string;
+  supplierGstin: string;
+  supplierAddress: string;
   invoiceNumber: string;
-  date: string;
+  invoiceDate: string;
   dueDate: string;
-  taxableAmount: number;
-  gstRate: number;
+  poNumber: string;
+  placeOfSupply: string;
+  items: ReviewItem[];
   cgst: number;
   sgst: number;
   igst: number;
-  totalAmount: number;
-  hsn: string;
+  cess: number;
+  roundOff: number;
+  subtotal: number;
+  totalDiscount: number;
+  taxableAmount: number;
+  totalTax: number;
+  grandTotal: number;
+  warnings: ExtractionWarning[];
+  fieldConfidence: FieldConfidence[];
+  overallConfidence: number;
 }
+
+const num = (v: number | undefined | null): number =>
+  v === null || v === undefined || Number.isNaN(v) ? 0 : v;
+const str = (v: string | undefined | null): string => v ?? '';
+
+const buildReviewModel = (
+  proposal: AiExtractionProposal,
+  file: File,
+): ReviewModel => {
+  const doc = proposal.proposedAction;
+  return {
+    fileName: file.name,
+    fileSize: `${(file.size / 1024).toFixed(0)} KB`,
+    supplierName: str(doc.supplier?.name),
+    supplierGstin: str(doc.supplier?.gstin),
+    supplierAddress: str(doc.supplier?.address),
+    invoiceNumber: str(doc.invoice?.number),
+    invoiceDate: str(doc.invoice?.date),
+    dueDate: str(doc.invoice?.dueDate),
+    poNumber: str(doc.invoice?.poNumber),
+    placeOfSupply: str(doc.invoice?.placeOfSupply),
+    items: (doc.items ?? []).map((item) => ({
+      description: str(item.description),
+      hsn: str(item.hsn),
+      quantity: num(item.quantity),
+      unit: str(item.unit),
+      unitPrice: num(item.unitPrice),
+      discount: num(item.discount),
+      taxRate: num(item.taxRate),
+      taxableAmount: num(item.taxableAmount),
+      itcEligible: item.itcEligible !== false,
+    })),
+    cgst: num(doc.tax?.cgst),
+    sgst: num(doc.tax?.sgst),
+    igst: num(doc.tax?.igst),
+    cess: num(doc.tax?.cess),
+    roundOff: num(doc.tax?.roundOff),
+    subtotal: num(doc.totals?.subtotal),
+    totalDiscount: num(doc.totals?.totalDiscount),
+    taxableAmount: num(doc.totals?.taxableAmount),
+    totalTax: num(doc.totals?.totalTax),
+    grandTotal: num(doc.totals?.grandTotal),
+    warnings: proposal.warnings ?? [],
+    fieldConfidence: proposal.fieldConfidence ?? [],
+    overallConfidence: proposal.overallConfidence ?? 0,
+  };
+};
+
+const WARNING_STYLES: Record<string, string> = {
+  error: 'bg-red-50 border-red-200 text-red-800',
+  warning: 'bg-amber-50 border-amber-200 text-amber-900',
+  info: 'bg-slate-50 border-slate-200 text-slate-700',
+};
+
+const WARNING_ICONS: Record<string, React.ReactNode> = {
+  error: <AlertCircle size={13} className="text-red-600 shrink-0 mt-0.5" />,
+  warning: <AlertTriangle size={13} className="text-amber-600 shrink-0 mt-0.5" />,
+  info: <Info size={13} className="text-slate-500 shrink-0 mt-0.5" />,
+};
 
 export const DocumentScannerView: React.FC<DocumentScannerViewProps> = ({ navigate }) => {
   const { vendors } = useAccounting();
   const dispatch = useAppDispatch();
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const activeOrganizationId = useAppSelector(
+    (state) => state.organizations.activeOrganizationId,
+  );
 
   const [isDragging, setIsDragging] = useState(false);
   const [isProcessing, setIsProcessing] = useState(false);
   const [submitStatus, setSubmitStatus] = useState<'IDLE' | 'SUBMITTING' | 'SUCCESS' | 'ERROR'>('IDLE');
   const [errorMessage, setErrorMessage] = useState('');
-  const [isEditing, setIsEditing] = useState(false);
+  const [review, setReview] = useState<ReviewModel | null>(null);
+  const [vendorMatchId, setVendorMatchId] = useState<string | null>(null);
+  const [duplicateNotice, setDuplicateNotice] = useState<string | null>(null);
+  const [selectedVendorId, setSelectedVendorId] = useState('');
+  const [warningsAcknowledged, setWarningsAcknowledged] = useState(false);
 
-  const [extractedData, setExtractedData] = useState<ExtractedBillData | null>(null);
+  useEffect(() => {
+    // Vendor must be resolved by a human — auto-select ONLY the backend's
+    // exact-GSTIN match as the default choice, never a blind vendors[0].
+    setSelectedVendorId(vendorMatchId ?? '');
+  }, [vendorMatchId]);
+
+  const errorWarnings = useMemo(
+    () => (review?.warnings ?? []).filter((w) => w.severity === 'error'),
+    [review],
+  );
+
+  const missingCoreFields = useMemo(() => {
+    if (!review) return [] as string[];
+    const missing: string[] = [];
+    if (!selectedVendorId) missing.push('vendor');
+    if (!review.invoiceNumber.trim()) missing.push('invoice number');
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(review.invoiceDate)) missing.push('invoice date');
+    if (review.items.length === 0) missing.push('at least one line item');
+    if (review.items.some((i) => !i.description.trim() || i.quantity <= 0)) {
+      missing.push('complete line items (description + quantity)');
+    }
+    return missing;
+  }, [review, selectedVendorId]);
+
+  const gateReady =
+    !!review &&
+    missingCoreFields.length === 0 &&
+    (errorWarnings.length === 0 || warningsAcknowledged);
 
   const processFileExtraction = async (file: File) => {
     setIsProcessing(true);
-    setExtractedData(null);
+    setReview(null);
     setSubmitStatus('IDLE');
     setErrorMessage('');
+    setVendorMatchId(null);
+    setDuplicateNotice(null);
+    setWarningsAcknowledged(false);
+
+    // The active organization must be resolved before any tenant-scoped
+    // upload/extraction request (the backend validates it against both the
+    // URL segment and the x-organization-id header).
+    if (!activeOrganizationId) {
+      setIsProcessing(false);
+      setErrorMessage('Your organization is still loading. Try again in a moment.');
+      return;
+    }
 
     try {
-      // Upload file using files API
-      const organizationId = 'org_acme'; // TODO: Get from auth context
+      const organizationId = activeOrganizationId;
       const uploadResponse = await dispatch(uploadFile({ organizationId, file })).unwrap();
       const fileId = uploadResponse.file.id;
 
-      // Extract bill using AI API
-      const extractionResponse = await dispatch(extractBill({ organizationId, fileId })).unwrap();
+      const proposal = await dispatch(extractBill({ organizationId, fileId })).unwrap();
 
-      // Map the extraction response to our extractedData format
-      const suggested = extractionResponse.proposedAction;
-
-      setExtractedData({
-        fileName: file.name,
-        fileSize: `${(file.size / 1024).toFixed(0)} KB`,
-        vendorName: suggested.vendorName,
-        vendorGstin: suggested.vendorGstin,
-        invoiceNumber: suggested.invoiceNumber,
-        date: suggested.date,
-        dueDate: suggested.dueDate || '',
-        taxableAmount: suggested.taxableAmount,
-        gstRate: suggested.gstRate,
-        cgst: suggested.cgst,
-        sgst: suggested.sgst,
-        igst: suggested.igst,
-        totalAmount: suggested.totalAmount,
-        hsn: suggested.hsn || '',
-      });
-
-      setIsProcessing(false);
+      setReview(buildReviewModel(proposal, file));
+      setVendorMatchId(proposal.vendorMatch?.vendorId ?? null);
+      if (proposal.duplicate) {
+        setDuplicateNotice(
+          `Possible duplicate: purchase bill ${proposal.duplicate.billNumber ?? proposal.duplicate.billId.slice(0, 8)} ` +
+            `already exists for vendor invoice "${proposal.duplicate.vendorInvoiceNumber}"` +
+            (proposal.duplicate.grandTotal != null
+              ? ` (₹${proposal.duplicate.grandTotal})`
+              : '') +
+            '.',
+        );
+      }
     } catch (error) {
-      setIsProcessing(false);
       setErrorMessage(getApiErrorMessage(error, 'Failed to process document'));
+    } finally {
+      setIsProcessing(false);
     }
   };
 
@@ -107,75 +224,94 @@ export const DocumentScannerView: React.FC<DocumentScannerViewProps> = ({ naviga
     if (file) {
       await processFileExtraction(file);
     }
+    e.target.value = '';
   };
 
-  const handleSimulateSample = async (sampleVendor: string) => {
-    // Create a dummy file for sample vendors
-    const dummyContent = `%PDF-1.4\n%Dummy PDF content for ${sampleVendor}\n%%EOF`;
-    const dummyFile = new File([dummyContent], `${sampleVendor.toLowerCase().replace(/\s+/g, '_')}_bill.pdf`, { type: 'application/pdf' });
-    await processFileExtraction(dummyFile);
+  const patchReview = (patch: Partial<ReviewModel>) => {
+    setReview((prev) => (prev ? { ...prev, ...patch } : prev));
   };
 
-  const handleFieldChange = (field: keyof ExtractedBillData, value: any) => {
-    if (!extractedData) return;
-    const updated = { ...extractedData, [field]: value };
-    if (field === 'taxableAmount' || field === 'gstRate') {
-      const taxable = parseFloat(updated.taxableAmount.toString()) || 0;
-      const rate = parseFloat(updated.gstRate.toString()) || 0;
-      const totalGst = (taxable * rate) / 100;
-      updated.cgst = Math.round(totalGst / 2);
-      updated.sgst = Math.round(totalGst / 2);
-      updated.totalAmount = taxable + totalGst;
-    }
-    setExtractedData(updated);
+  const patchItem = (index: number, patch: Partial<ReviewItem>) => {
+    setReview((prev) => {
+      if (!prev) return prev;
+      const items = prev.items.map((item, i) =>
+        i === index ? { ...item, ...patch } : item,
+      );
+      return { ...prev, items };
+    });
   };
 
-  const handleConfirmAndPost = async () => {
-    if (!extractedData || submitStatus === 'SUBMITTING') return;
-    setSubmitStatus('SUBMITTING');
-    setErrorMessage('');
-
-    // Dispatch the real create thunk (the backend recomputes all totals server-side).
-    setTimeout(async () => {
-      const vendor = vendors.find((v) => v.gstin === extractedData.vendorGstin) || vendors[0];
-      if (!vendor) {
-        setErrorMessage('No vendor available to attach this bill. Create a vendor first.');
-        setSubmitStatus('ERROR');
-        return;
-      }
-      const taxable = Number(extractedData.taxableAmount) || 0;
-      const rate = Number(extractedData.gstRate) || 0;
-
-      try {
-        await dispatch(
-          createBill({
-            vendorId: vendor.id,
-            vendorInvoiceNumber: extractedData.invoiceNumber,
-            billDate: extractedData.date,
-            dueDate: extractedData.dueDate || undefined,
-            itcEligible: true,
+  const addItem = () => {
+    setReview((prev) =>
+      prev
+        ? {
+            ...prev,
             items: [
+              ...prev.items,
               {
-                description: `Industrial Inward Materials (HSN ${extractedData.hsn})`,
-                hsn: extractedData.hsn,
+                description: '',
+                hsn: '',
                 quantity: 1,
-                unitPrice: taxable,
-                taxRate: rate,
+                unit: '',
+                unitPrice: 0,
+                discount: 0,
+                taxRate: 18,
+                taxableAmount: 0,
                 itcEligible: true,
               },
             ],
-          }),
-        ).unwrap();
-        setSubmitStatus('SUCCESS');
-        setTimeout(() => {
-          navigate('/purchases');
-        }, 800);
-      } catch (err) {
-        setErrorMessage(getApiErrorMessage(err, 'Failed to inward the bill.'));
-        setSubmitStatus('ERROR');
-      }
-    }, 700);
+          }
+        : prev,
+    );
   };
+
+  const removeItem = (index: number) => {
+    setReview((prev) =>
+      prev ? { ...prev, items: prev.items.filter((_, i) => i !== index) } : prev,
+    );
+  };
+
+  const handleConfirmAndCreate = async () => {
+    if (!review || !selectedVendorId || submitStatus === 'SUBMITTING') return;
+    setSubmitStatus('SUBMITTING');
+    setErrorMessage('');
+
+    // Printed tax/totals are review metadata only. The payload carries raw
+    // line data (qty, price, discount, rate) and the backend recomputes all
+    // authoritative accounting totals in PurchasesService.calculateTotals.
+    const isInterState = review.igst > 0 && review.cgst === 0 && review.sgst === 0;
+    const payload: CreatePurchaseBillDto = {
+      vendorId: selectedVendorId,
+      vendorInvoiceNumber: review.invoiceNumber.trim(),
+      billDate: review.invoiceDate,
+      dueDate: review.dueDate || undefined,
+      placeOfSupply: review.placeOfSupply || undefined,
+      isInterState,
+      itcEligible: true,
+      items: review.items.map((item) => ({
+        description: item.description.trim(),
+        hsn: item.hsn.trim() || undefined,
+        quantity: item.quantity,
+        unitPrice: item.unitPrice,
+        discount: item.discount,
+        taxRate: item.taxRate,
+        itcEligible: item.itcEligible,
+      })),
+    };
+
+    try {
+      await dispatch(createBill(payload)).unwrap();
+      setSubmitStatus('SUCCESS');
+      navigate('/purchases');
+    } catch (err) {
+      setErrorMessage(getApiErrorMessage(err, 'Failed to create the purchase bill.'));
+      setSubmitStatus('ERROR');
+    }
+  };
+
+  const inputCls =
+    'w-full px-2 py-1 bg-white border border-slate-300 rounded-xs text-xs font-mono text-slate-900 focus:outline-none focus:border-slate-900';
+  const labelCls = 'text-[10px] font-sans font-medium text-slate-500 uppercase';
 
   return (
     <div className="space-y-6">
@@ -187,23 +323,22 @@ export const DocumentScannerView: React.FC<DocumentScannerViewProps> = ({ naviga
               <ScanLine size={15} />
             </div>
             <h1 className="text-xl font-bold text-slate-950 tracking-tight">
-              Document Ingestion & Inward Bill Extraction (OCR)
+              Document Ingestion &amp; Inward Bill Extraction (OCR)
             </h1>
           </div>
           <p className="text-xs text-slate-500 font-mono mt-1">
-            Automated optical character extraction for vendor tax invoices, credit notes, and statutory e-way bills
+            AI-extracted invoice data is a proposal — you review and approve; accounting totals are computed by the backend
           </p>
         </div>
       </div>
 
       <div className="grid grid-cols-1 lg:grid-cols-12 gap-6">
-        {/* Upload Zone (Left 6 cols) */}
+        {/* Upload Zone (Left 5 cols) */}
         <div className="lg:col-span-5 space-y-4">
           <input
             type="file"
-            ref={fileInputRef}
             onChange={handleFileInputChange}
-            accept=".pdf,.jpg,.jpeg,.png"
+            accept=".pdf,.jpg,.jpeg,.png,.webp"
             className="hidden"
             id="native-ocr-file-input"
           />
@@ -220,14 +355,9 @@ export const DocumentScannerView: React.FC<DocumentScannerViewProps> = ({ naviga
               const file = e.dataTransfer.files?.[0];
               if (file) {
                 await processFileExtraction(file);
-              } else {
-                // Create a dummy file for the fallback case
-                const dummyContent = `%PDF-1.4\n%Dummy PDF content for dropped file\n%%EOF`;
-                const dummyFile = new File([dummyContent], 'dropped_tax_invoice.pdf', { type: 'application/pdf' });
-                await processFileExtraction(dummyFile);
               }
             }}
-            onClick={() => fileInputRef.current?.click()}
+            onClick={() => document.getElementById('native-ocr-file-input')?.click()}
             className={`border-2 border-dashed rounded-xs p-8 text-center cursor-pointer transition-colors bg-white ${
               isDragging
                 ? 'border-slate-900 bg-slate-50'
@@ -241,73 +371,52 @@ export const DocumentScannerView: React.FC<DocumentScannerViewProps> = ({ naviga
               Upload Tax Invoice or Bill
             </h3>
             <p className="text-[11px] text-slate-500 mt-1 font-mono">
-              Click to browse or drag & drop (PDF, JPG, PNG up to 15MB)
+              Click to browse or drag &amp; drop (PDF, JPG, PNG, WEBP up to 10MB)
             </p>
             <div className="mt-4 inline-flex items-center gap-1.5 px-3 py-1 bg-slate-100 text-slate-700 text-[11px] font-mono rounded-xs border border-slate-200">
               <ShieldCheck size={13} className="text-emerald-700" />
-              <span>Auto-detects Supplier GSTIN, HSN & Tax Breakdown</span>
+              <span>Extracts supplier GSTIN, line items &amp; tax breakdown</span>
             </div>
           </div>
 
-          {/* Quick Preloaded Sample Vendor Invoices */}
-          <div className="bg-white border border-slate-200 p-4 rounded-xs">
-            <div className="text-[11px] font-mono uppercase font-bold text-slate-500 mb-2">
-              Or Load Verified Sample Bill:
+          {/* Extraction errors are always visible, even with no review data */}
+          {errorMessage && (
+            <div className="bg-red-50 border border-red-200 text-red-800 rounded-xs px-3 py-2.5 text-xs flex items-start gap-2">
+              <AlertCircle size={14} className="mt-0.5 shrink-0" />
+              <div>
+                <div className="font-bold">Extraction failed</div>
+                <div className="mt-0.5">{errorMessage}</div>
+              </div>
             </div>
-            <div className="space-y-2">
-              <button
-                type="button"
-                onClick={() => handleSimulateSample('Precision Components Pvt Ltd')}
-                className="w-full p-2.5 bg-slate-50 border border-slate-200 hover:border-slate-400 rounded-xs text-left text-xs flex items-center justify-between transition-colors"
-              >
-                <div>
-                  <div className="font-semibold text-slate-900">Precision Components Bill #INV-904</div>
-                  <div className="text-[10px] text-slate-500 font-mono">Taxable: ₹65,000 • GST: 18% (HSN 8466)</div>
-                </div>
-                <span className="text-xs font-semibold text-slate-900 font-mono">Select →</span>
-              </button>
-              <button
-                type="button"
-                onClick={() => handleSimulateSample('Kulkarni Steel Works')}
-                className="w-full p-2.5 bg-slate-50 border border-slate-200 hover:border-slate-400 rounded-xs text-left text-xs flex items-center justify-between transition-colors"
-              >
-                <div>
-                  <div className="font-semibold text-slate-900">Kulkarni Steel Inward Bill #KS-441</div>
-                  <div className="text-[10px] text-slate-500 font-mono">Taxable: ₹1,20,000 • GST: 18% (HSN 7208)</div>
-                </div>
-                <span className="text-xs font-semibold text-slate-900 font-mono">Select →</span>
-              </button>
-            </div>
-          </div>
+          )}
         </div>
 
         {/* Extraction & Review Panel (Right 7 cols) */}
         <div className="lg:col-span-7 bg-white border border-slate-200 p-6 rounded-xs flex flex-col justify-between">
-          <div>
-            <div className="border-b border-slate-100 pb-3 mb-4 flex items-center justify-between">
+          <div className="space-y-4">
+            <div className="border-b border-slate-100 pb-3 flex items-center justify-between">
               <div>
                 <h3 className="text-sm font-bold text-slate-900">
-                  Extracted Bill & Accounting Review
+                  Extracted Bill &amp; Accounting Review
                 </h3>
                 <p className="text-[11px] text-slate-500 font-mono">
-                  Review extracted fields before authorizing posting to Accounts Payable
+                  Review and correct every field before authorizing the purchase bill
                 </p>
               </div>
-              {extractedData && (
-                <div className="flex items-center gap-2">
-                  <button
-                    type="button"
-                    onClick={() => setIsEditing(!isEditing)}
-                    className="text-[11px] font-mono font-medium px-2 py-1 border border-slate-300 hover:bg-slate-50 rounded-xs flex items-center gap-1 text-slate-700"
-                  >
-                    <Edit3 size={12} />
-                    <span>{isEditing ? 'Done Editing' : 'Edit Fields'}</span>
-                  </button>
-                  <span className="px-2 py-1 text-[10px] font-mono font-bold bg-emerald-100 text-emerald-900 rounded-xs flex items-center gap-1">
-                    <Check size={12} />
-                    <span>99.4% Match</span>
-                  </span>
-                </div>
+              {review && (
+                <span
+                  className={`px-2 py-1 text-[10px] font-mono font-bold rounded-xs flex items-center gap-1 ${
+                    review.overallConfidence >= 0.8
+                      ? 'bg-emerald-100 text-emerald-900'
+                      : review.overallConfidence >= 0.5
+                        ? 'bg-amber-100 text-amber-900'
+                        : 'bg-red-100 text-red-900'
+                  }`}
+                  title="Advisory score derived from field presence, format validity and arithmetic consistency. Not a guarantee."
+                >
+                  <Info size={11} />
+                  Extraction confidence {Math.round(review.overallConfidence * 100)}% (advisory)
+                </span>
               )}
             </div>
 
@@ -315,196 +424,347 @@ export const DocumentScannerView: React.FC<DocumentScannerViewProps> = ({ naviga
               <div className="py-20 text-center space-y-3">
                 <div className="w-7 h-7 border-2 border-slate-900 border-t-transparent rounded-full animate-spin mx-auto" />
                 <div className="text-xs font-mono text-slate-700 font-bold">
-                  Extracting line items, HSN codes, and verifying supplier GSTIN...
+                  Extracting supplier, line items, and tax breakdown...
                 </div>
               </div>
-            ) : extractedData ? (
+            ) : review ? (
               <div className="space-y-4 text-xs font-mono">
                 {/* File Badge */}
                 <div className="flex items-center justify-between p-2.5 bg-slate-100/70 border border-slate-200 rounded-xs text-[11px]">
                   <div className="flex items-center gap-2 truncate">
                     <FileText size={14} className="text-slate-600 shrink-0" />
-                    <span className="font-bold text-slate-900 truncate">{extractedData.fileName}</span>
-                    <span className="text-slate-500 font-sans">({extractedData.fileSize})</span>
+                    <span className="font-bold text-slate-900 truncate">{review.fileName}</span>
+                    <span className="text-slate-500 font-sans">({review.fileSize})</span>
                   </div>
-                  <span className="text-[10px] text-slate-500 font-sans uppercase font-bold">OCR Parsed</span>
+                  <span className="text-[10px] text-slate-500 font-sans uppercase font-bold">AI Parsed</span>
                 </div>
 
-                {/* Editable / Readonly Fields Grid */}
+                {/* Warnings — never hidden */}
+                {review.warnings.length > 0 && (
+                  <div className="space-y-1.5">
+                    <div className="text-[10px] font-sans font-bold text-slate-500 uppercase">
+                      Validation Warnings ({review.warnings.length})
+                    </div>
+                    {review.warnings.map((w, i) => (
+                      <div
+                        key={`${w.code}-${i}`}
+                        className={`rounded-xs border px-2.5 py-1.5 text-[11px] flex items-start gap-2 ${WARNING_STYLES[w.severity] ?? WARNING_STYLES.info}`}
+                      >
+                        {WARNING_ICONS[w.severity] ?? WARNING_ICONS.info}
+                        <span>{w.message}</span>
+                      </div>
+                    ))}
+                  </div>
+                )}
+
+                {/* Duplicate notice */}
+                {duplicateNotice && (
+                  <div className="rounded-xs border px-2.5 py-1.5 text-[11px] flex items-start gap-2 bg-red-50 border-red-200 text-red-800">
+                    <AlertCircle size={13} className="text-red-600 shrink-0 mt-0.5" />
+                    <span>{duplicateNotice}</span>
+                  </div>
+                )}
+
+                {/* Supplier */}
                 <div className="bg-slate-50 border border-slate-200 p-4 rounded-xs space-y-3">
+                  <div className="text-[10px] font-sans font-bold text-slate-500 uppercase">Supplier (as printed)</div>
                   <div className="grid grid-cols-2 gap-3">
                     <div>
-                      <label className="text-[10px] font-sans font-medium text-slate-500 uppercase">Vendor Name</label>
-                      {isEditing ? (
-                        <input
-                          type="text"
-                          value={extractedData.vendorName}
-                          onChange={(e) => handleFieldChange('vendorName', e.target.value)}
-                          className="w-full mt-0.5 px-2 py-1 bg-white border border-slate-300 rounded-xs text-xs font-mono font-bold text-slate-900 focus:outline-none focus:border-slate-900"
-                        />
-                      ) : (
-                        <div className="font-bold text-slate-900 mt-0.5">{extractedData.vendorName}</div>
-                      )}
+                      <label className={labelCls}>Name</label>
+                      <input type="text" value={review.supplierName}
+                        onChange={(e) => patchReview({ supplierName: e.target.value })}
+                        className={`${inputCls} font-bold mt-0.5`} />
                     </div>
-
                     <div>
-                      <label className="text-[10px] font-sans font-medium text-slate-500 uppercase">Vendor GSTIN</label>
-                      {isEditing ? (
-                        <input
-                          type="text"
-                          value={extractedData.vendorGstin}
-                          onChange={(e) => handleFieldChange('vendorGstin', e.target.value.toUpperCase())}
-                          className="w-full mt-0.5 px-2 py-1 bg-white border border-slate-300 rounded-xs text-xs font-mono font-bold text-slate-900 focus:outline-none focus:border-slate-900"
-                        />
-                      ) : (
-                        <div className="font-bold text-slate-900 mt-0.5">{extractedData.vendorGstin}</div>
-                      )}
+                      <label className={labelCls}>GSTIN</label>
+                      <input type="text" value={review.supplierGstin}
+                        onChange={(e) => patchReview({ supplierGstin: e.target.value.toUpperCase() })}
+                        className={`${inputCls} font-bold mt-0.5`} />
                     </div>
                   </div>
+                  <div>
+                    <label className={labelCls}>Address</label>
+                    <input type="text" value={review.supplierAddress}
+                      onChange={(e) => patchReview({ supplierAddress: e.target.value })}
+                      className={`${inputCls} mt-0.5`} />
+                  </div>
+                </div>
 
-                  <div className="grid grid-cols-3 gap-3 border-t border-slate-200/60 pt-2">
-                    <div>
-                      <label className="text-[10px] font-sans font-medium text-slate-500 uppercase">Invoice Number</label>
-                      {isEditing ? (
-                        <input
-                          type="text"
-                          value={extractedData.invoiceNumber}
-                          onChange={(e) => handleFieldChange('invoiceNumber', e.target.value)}
-                          className="w-full mt-0.5 px-2 py-1 bg-white border border-slate-300 rounded-xs text-xs font-mono text-slate-900 focus:outline-none focus:border-slate-900"
-                        />
-                      ) : (
-                        <div className="text-slate-900 mt-0.5">{extractedData.invoiceNumber}</div>
-                      )}
+                {/* Vendor assignment */}
+                <div className="bg-slate-50 border border-slate-200 p-4 rounded-xs space-y-2">
+                  <div className="text-[10px] font-sans font-bold text-slate-500 uppercase">Vendor (required)</div>
+                  {vendorMatchId ? (
+                    <div className="text-[11px] flex items-center gap-1.5 text-emerald-800">
+                      <CheckCircle2 size={13} />
+                      Matched by GSTIN to your vendor master
                     </div>
-
-                    <div>
-                      <label className="text-[10px] font-sans font-medium text-slate-500 uppercase">Invoice Date</label>
-                      {isEditing ? (
-                        <input
-                          type="date"
-                          value={extractedData.date}
-                          onChange={(e) => handleFieldChange('date', e.target.value)}
-                          className="w-full mt-0.5 px-2 py-1 bg-white border border-slate-300 rounded-xs text-xs font-mono text-slate-900 focus:outline-none focus:border-slate-900"
-                        />
-                      ) : (
-                        <div className="text-slate-900 mt-0.5">{extractedData.date}</div>
-                      )}
+                  ) : (
+                    <div className="text-[11px] flex items-center gap-1.5 text-amber-800">
+                      <AlertTriangle size={13} />
+                      Vendor not found — select an existing vendor (or create one first)
                     </div>
+                  )}
+                  <select
+                    value={selectedVendorId}
+                    onChange={(e) => setSelectedVendorId(e.target.value)}
+                    className={inputCls}
+                  >
+                    <option value="">— Select vendor —</option>
+                    {vendors.map((v) => (
+                      <option key={v.id} value={v.id}>
+                        {v.name}{v.gstin ? ` (${v.gstin})` : ''}
+                      </option>
+                    ))}
+                  </select>
+                </div>
 
+                {/* Invoice header */}
+                <div className="bg-slate-50 border border-slate-200 p-4 rounded-xs space-y-3">
+                  <div className="text-[10px] font-sans font-bold text-slate-500 uppercase">Invoice</div>
+                  <div className="grid grid-cols-3 gap-3">
                     <div>
-                      <label className="text-[10px] font-sans font-medium text-slate-500 uppercase">HSN Code</label>
-                      {isEditing ? (
-                        <input
-                          type="text"
-                          value={extractedData.hsn}
-                          onChange={(e) => handleFieldChange('hsn', e.target.value)}
-                          className="w-full mt-0.5 px-2 py-1 bg-white border border-slate-300 rounded-xs text-xs font-mono text-slate-900 focus:outline-none focus:border-slate-900"
-                        />
-                      ) : (
-                        <div className="text-slate-900 mt-0.5">{extractedData.hsn}</div>
-                      )}
+                      <label className={labelCls}>Invoice Number</label>
+                      <input type="text" value={review.invoiceNumber}
+                        onChange={(e) => patchReview({ invoiceNumber: e.target.value })}
+                        className={`${inputCls} mt-0.5`} />
+                    </div>
+                    <div>
+                      <label className={labelCls}>Invoice Date</label>
+                      <input type="date" value={review.invoiceDate}
+                        onChange={(e) => patchReview({ invoiceDate: e.target.value })}
+                        className={`${inputCls} mt-0.5`} />
+                    </div>
+                    <div>
+                      <label className={labelCls}>Due Date</label>
+                      <input type="date" value={review.dueDate}
+                        onChange={(e) => patchReview({ dueDate: e.target.value })}
+                        className={`${inputCls} mt-0.5`} />
                     </div>
                   </div>
-
-                  <div className="grid grid-cols-3 gap-3 border-t border-slate-200/60 pt-2">
+                  <div className="grid grid-cols-2 gap-3">
                     <div>
-                      <label className="text-[10px] font-sans font-medium text-slate-500 uppercase">Taxable Value (₹)</label>
-                      {isEditing ? (
-                        <input
-                          type="number"
-                          value={extractedData.taxableAmount}
-                          onChange={(e) => handleFieldChange('taxableAmount', parseFloat(e.target.value) || 0)}
-                          className="w-full mt-0.5 px-2 py-1 bg-white border border-slate-300 rounded-xs text-xs font-mono font-bold text-slate-900 focus:outline-none focus:border-slate-900"
-                        />
-                      ) : (
-                        <div className="text-slate-900 font-bold mt-0.5">{formatINR(extractedData.taxableAmount)}</div>
-                      )}
+                      <label className={labelCls}>PO Number</label>
+                      <input type="text" value={review.poNumber}
+                        onChange={(e) => patchReview({ poNumber: e.target.value })}
+                        className={`${inputCls} mt-0.5`} />
                     </div>
-
                     <div>
-                      <label className="text-[10px] font-sans font-medium text-slate-500 uppercase">GST Rate</label>
-                      {isEditing ? (
-                        <select
-                          value={extractedData.gstRate}
-                          onChange={(e) => handleFieldChange('gstRate', parseFloat(e.target.value) || 0)}
-                          className="w-full mt-0.5 px-2 py-1 bg-white border border-slate-300 rounded-xs text-xs font-mono text-slate-900 focus:outline-none focus:border-slate-900"
-                        >
-                          <option value="0">0%</option>
-                          <option value="5">5%</option>
-                          <option value="12">12%</option>
-                          <option value="18">18%</option>
-                          <option value="28">28%</option>
-                        </select>
-                      ) : (
-                        <div className="text-slate-900 mt-0.5">{extractedData.gstRate}%</div>
-                      )}
+                      <label className={labelCls}>Place of Supply</label>
+                      <input type="text" value={review.placeOfSupply}
+                        onChange={(e) => patchReview({ placeOfSupply: e.target.value })}
+                        className={`${inputCls} mt-0.5`} />
                     </div>
+                  </div>
+                </div>
 
-                    <div>
-                      <label className="text-[10px] font-sans font-medium text-slate-500 uppercase">CGST + SGST (₹)</label>
-                      <div className="text-slate-900 mt-0.5">{formatINR(extractedData.cgst + extractedData.sgst)}</div>
+                {/* Line items */}
+                <div className="bg-slate-50 border border-slate-200 p-4 rounded-xs space-y-2">
+                  <div className="flex items-center justify-between">
+                    <div className="text-[10px] font-sans font-bold text-slate-500 uppercase">
+                      Line Items ({review.items.length})
                     </div>
+                    <button type="button" onClick={addItem}
+                      className="text-[10px] font-mono font-medium px-2 py-1 border border-slate-300 hover:bg-white rounded-xs flex items-center gap-1 text-slate-700">
+                      <Plus size={11} /> Add Row
+                    </button>
+                  </div>
+                  <div className="overflow-x-auto">
+                    <table className="w-full text-[10px]">
+                      <thead>
+                        <tr className="text-slate-500 text-left">
+                          <th className="py-1 pr-2 font-medium">Description</th>
+                          <th className="py-1 pr-2 font-medium">HSN</th>
+                          <th className="py-1 pr-2 font-medium">Qty</th>
+                          <th className="py-1 pr-2 font-medium">Unit</th>
+                          <th className="py-1 pr-2 font-medium">Unit ₹</th>
+                          <th className="py-1 pr-2 font-medium">Disc ₹</th>
+                          <th className="py-1 pr-2 font-medium">GST %</th>
+                          <th className="py-1 pr-2 font-medium">Taxable ₹</th>
+                          <th className="py-1" />
+                        </tr>
+                      </thead>
+                      <tbody>
+                        {review.items.map((item, index) => (
+                          <tr key={index} className="border-t border-slate-200/70">
+                            <td className="py-1 pr-2">
+                              <input type="text" value={item.description}
+                                onChange={(e) => patchItem(index, { description: e.target.value })}
+                                className={inputCls} />
+                            </td>
+                            <td className="py-1 pr-2 w-16">
+                              <input type="text" value={item.hsn}
+                                onChange={(e) => patchItem(index, { hsn: e.target.value })}
+                                className={inputCls} />
+                            </td>
+                            <td className="py-1 pr-2 w-16">
+                              <input type="number" step="0.0001" min="0" value={item.quantity}
+                                onChange={(e) => patchItem(index, { quantity: parseFloat(e.target.value) || 0 })}
+                                className={inputCls} />
+                            </td>
+                            <td className="py-1 pr-2 w-14">
+                              <input type="text" value={item.unit}
+                                onChange={(e) => patchItem(index, { unit: e.target.value })}
+                                className={inputCls} />
+                            </td>
+                            <td className="py-1 pr-2 w-20">
+                              <input type="number" step="0.01" min="0" value={item.unitPrice}
+                                onChange={(e) => patchItem(index, { unitPrice: parseFloat(e.target.value) || 0 })}
+                                className={inputCls} />
+                            </td>
+                            <td className="py-1 pr-2 w-20">
+                              <input type="number" step="0.01" min="0" value={item.discount}
+                                onChange={(e) => patchItem(index, { discount: parseFloat(e.target.value) || 0 })}
+                                className={inputCls} />
+                            </td>
+                            <td className="py-1 pr-2 w-16">
+                              <input type="number" step="0.01" min="0" value={item.taxRate}
+                                onChange={(e) => patchItem(index, { taxRate: parseFloat(e.target.value) || 0 })}
+                                className={inputCls} />
+                            </td>
+                            <td className="py-1 pr-2 w-24">
+                              <input type="number" step="0.01" min="0" value={item.taxableAmount}
+                                onChange={(e) => patchItem(index, { taxableAmount: parseFloat(e.target.value) || 0 })}
+                                className={inputCls} />
+                            </td>
+                            <td className="py-1 w-6">
+                              <button type="button" onClick={() => removeItem(index)}
+                                title="Remove line item"
+                                className="text-slate-400 hover:text-red-600">
+                                <Trash2 size={12} />
+                              </button>
+                            </td>
+                          </tr>
+                        ))}
+                      </tbody>
+                    </table>
+                  </div>
+                </div>
+
+                {/* Tax + totals (printed values — backend recomputes on creation) */}
+                <div className="bg-slate-50 border border-slate-200 p-4 rounded-xs space-y-3">
+                  <div className="text-[10px] font-sans font-bold text-slate-500 uppercase">Tax (as printed)</div>
+                  <div className="grid grid-cols-5 gap-2">
+                    {([
+                      ['CGST', 'cgst'],
+                      ['SGST', 'sgst'],
+                      ['IGST', 'igst'],
+                      ['CESS', 'cess'],
+                      ['Round-off', 'roundOff'],
+                    ] as const).map(([label, key]) => (
+                      <div key={key}>
+                        <label className={labelCls}>{label}</label>
+                        <input type="number" step="0.01" value={review[key]}
+                          onChange={(e) => patchReview({ [key]: parseFloat(e.target.value) || 0 } as Partial<ReviewModel>)}
+                          className={`${inputCls} mt-0.5`} />
+                      </div>
+                    ))}
+                  </div>
+
+                  <div className="text-[10px] font-sans font-bold text-slate-500 uppercase pt-1">
+                    Totals (as printed)
+                  </div>
+                  <div className="grid grid-cols-5 gap-2">
+                    {([
+                      ['Subtotal', 'subtotal'],
+                      ['Discount', 'totalDiscount'],
+                      ['Taxable', 'taxableAmount'],
+                      ['Total Tax', 'totalTax'],
+                      ['Grand Total', 'grandTotal'],
+                    ] as const).map(([label, key]) => (
+                      <div key={key}>
+                        <label className={labelCls}>{label}</label>
+                        <input type="number" step="0.01" value={review[key]}
+                          onChange={(e) => patchReview({ [key]: parseFloat(e.target.value) || 0 } as Partial<ReviewModel>)}
+                          className={`${inputCls} mt-0.5 ${key === 'grandTotal' ? 'font-bold' : ''}`} />
+                      </div>
+                    ))}
                   </div>
 
                   <div className="flex justify-between items-center pt-2 border-t border-slate-300 text-sm font-bold text-slate-950">
-                    <span className="font-sans">Total Inward Bill Amount:</span>
-                    <span>{formatINR(extractedData.totalAmount)}</span>
+                    <span className="font-sans">Printed Grand Total:</span>
+                    <span>{formatINR(review.grandTotal)}</span>
                   </div>
-                </div>
-
-                <div className="p-3 bg-emerald-50 border border-emerald-200 text-emerald-900 rounded-xs flex items-center gap-2">
-                  <CheckCircle2 size={16} className="text-emerald-700 shrink-0" />
-                  <span>GSTIN status active on portal. Verified 100% eligible for GSTR-3B Input Tax Credit (ITC).</span>
+                  <p className="text-[10px] text-slate-500 font-sans">
+                    Printed values are kept for review. When you confirm, the backend recomputes all accounting
+                    totals from the line items above — printed values never post to the ledger.
+                  </p>
                 </div>
               </div>
             ) : (
               <div className="py-20 text-center text-slate-400 text-xs font-mono">
-                Upload or select a vendor bill on the left to extract and review metadata.
+                Upload a vendor bill on the left to extract and review its fields.
               </div>
             )}
           </div>
 
-          {extractedData && (
+          {review && (
             <div className="pt-4 border-t border-slate-200 space-y-3">
-              {errorMessage && (
+              {/* Human review gate */}
+              {errorWarnings.length > 0 && (
+                <label className="flex items-start gap-2 text-[11px] text-red-800 bg-red-50 border border-red-200 rounded-xs px-2.5 py-2 cursor-pointer">
+                  <input
+                    type="checkbox"
+                    checked={warningsAcknowledged}
+                    onChange={(e) => setWarningsAcknowledged(e.target.checked)}
+                    className="mt-0.5 accent-red-700"
+                  />
+                  <span>
+                    I have reviewed the {errorWarnings.length} critical warning{errorWarnings.length > 1 ? 's' : ''} above
+                    and confirm this bill should still be created.
+                  </span>
+                </label>
+              )}
+
+              {missingCoreFields.length > 0 && (
+                <div className="text-[11px] text-slate-600 bg-slate-50 border border-slate-200 rounded-xs px-2.5 py-2 flex items-start gap-2">
+                  <AlertTriangle size={13} className="text-amber-600 shrink-0 mt-0.5" />
+                  <span>Required before creating the bill: {missingCoreFields.join(', ')}.</span>
+                </div>
+              )}
+
+              {submitStatus === 'ERROR' && errorMessage && (
                 <div className="bg-red-50 border border-red-200 text-red-800 rounded-xs px-3 py-2 text-xs flex items-center gap-2">
                   <AlertCircle size={13} />{errorMessage}
                 </div>
               )}
-              <div className="flex items-center justify-between gap-3">
-              <button
-                type="button"
-                onClick={() => setExtractedData(null)}
-                disabled={submitStatus === 'SUBMITTING'}
-                className="px-4 py-2 border border-slate-300 text-slate-700 hover:bg-slate-50 rounded-xs text-xs font-medium"
-              >
-                Clear
-              </button>
 
-              <button
-                type="button"
-                disabled={submitStatus === 'SUBMITTING'}
-                onClick={handleConfirmAndPost}
-                id="confirm-post-ocr-btn"
-                className="px-6 py-2.5 bg-slate-950 hover:bg-slate-800 disabled:opacity-50 text-white rounded-xs text-xs font-bold flex items-center gap-2 transition-colors"
-              >
-                {submitStatus === 'SUBMITTING' ? (
-                  <>
-                    <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
-                    <span>Inwarding Bill to Accounts Payable...</span>
-                  </>
-                ) : submitStatus === 'SUCCESS' ? (
-                  <>
-                    <CheckCircle2 size={14} className="text-emerald-400" />
-                    <span>Bill Inwarded to Ledger!</span>
-                  </>
-                ) : (
-                  <>
-                    <span>Authorize & Inward Bill to Ledger</span>
-                    <ArrowRight size={14} />
-                  </>
-                )}
-              </button>
+              <div className="flex items-center justify-between gap-3">
+                <button
+                  type="button"
+                  onClick={() => {
+                    setReview(null);
+                    setVendorMatchId(null);
+                    setDuplicateNotice(null);
+                    setWarningsAcknowledged(false);
+                    setErrorMessage('');
+                    setSubmitStatus('IDLE');
+                  }}
+                  disabled={submitStatus === 'SUBMITTING'}
+                  className="px-4 py-2 border border-slate-300 text-slate-700 hover:bg-slate-50 rounded-xs text-xs font-medium"
+                >
+                  Clear
+                </button>
+
+                <button
+                  type="button"
+                  disabled={!gateReady || submitStatus === 'SUBMITTING'}
+                  onClick={handleConfirmAndCreate}
+                  id="confirm-post-ocr-btn"
+                  title={gateReady ? '' : 'Resolve the review requirements above first'}
+                  className="px-6 py-2.5 bg-slate-950 hover:bg-slate-800 disabled:opacity-40 disabled:cursor-not-allowed text-white rounded-xs text-xs font-bold flex items-center gap-2 transition-colors"
+                >
+                  {submitStatus === 'SUBMITTING' ? (
+                    <>
+                      <div className="w-3.5 h-3.5 border-2 border-white border-t-transparent rounded-full animate-spin" />
+                      <span>Creating Purchase Bill...</span>
+                    </>
+                  ) : (
+                    <>
+                      <span>Confirm &amp; Create Bill</span>
+                      <ArrowRight size={14} />
+                    </>
+                  )}
+                </button>
               </div>
             </div>
           )}

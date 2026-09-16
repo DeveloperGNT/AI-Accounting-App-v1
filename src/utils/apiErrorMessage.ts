@@ -2,6 +2,13 @@
 // (not an Error instance), so err instanceof Error misses it. This helper
 // extracts the backend's message plus class-validator details when present.
 export const getApiErrorMessage = (err: unknown, fallback: string): string => {
+  // Thunks reject with a plain string (the already-extracted backend message)
+  // and .unwrap() re-throws that string. It is a real, specific message —
+  // never discard it in favour of the generic fallback.
+  if (typeof err === 'string' && err.trim()) {
+    return err.trim();
+  }
+
   if (err && typeof err === 'object') {
     const e = err as { message?: unknown; validationMessages?: unknown };
     const parts: string[] = [];

@@ -1,5 +1,10 @@
 import { createAsyncThunk, createSlice } from '@reduxjs/toolkit';
 import { journalEntriesApi } from '../../api/journalEntriesApi';
+import {
+  resetOnOrganizationChange,
+  selectOrganization,
+  clearOrganizations,
+} from '../organizations/organizationsSlice';
 import type {
   JournalEntry,
   CreateJournalEntryDto,
@@ -67,6 +72,9 @@ const journalEntriesSlice = createSlice({
   initialState,
   reducers: {},
   extraReducers: (builder) => {
+    // Tenant switch: drop the previous organization's journal entries.
+    builder.addCase(selectOrganization, resetOnOrganizationChange);
+    builder.addCase(clearOrganizations, resetOnOrganizationChange);
     // Create
     builder.addCase(createJournalEntry.pending, (state) => {
       state.status = 'loading';

@@ -1,7 +1,8 @@
 import { createSlice, createAsyncThunk, PayloadAction } from '@reduxjs/toolkit';
 import type { RootState } from '../../app/store';
 import { notificationsApi } from '../../api/notificationsApi';
-import type { AppNotification, NotificationPreference } from '../../types';
+import type { NotificationPreference } from '../../api/notificationsApi';
+import type { AppNotification } from '../../types';
 
 // Define the state interface
 interface NotificationsState {

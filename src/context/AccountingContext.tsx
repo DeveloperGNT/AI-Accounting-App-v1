@@ -18,7 +18,6 @@ import {
   Role
 } from '../types';
 import {
-  INITIAL_ORGANIZATIONS,
   INITIAL_TRANSACTIONS,
   INITIAL_BANK_ACCOUNTS,
   INITIAL_BANK_FEEDS,
@@ -32,8 +31,8 @@ import { useAppDispatch, useAppSelector } from '../app/hooks';
 import {
   fetchNotifications,
   fetchUnreadCount,
-  markNotificationRead,
-  markAllNotificationsRead,
+  markNotificationRead as markNotificationReadThunk,
+  markAllNotificationsRead as markAllNotificationsReadThunk,
   fetchNotificationPreferences,
   updateNotificationPreference
 } from '../features/notifications/notificationsSlice';
@@ -238,24 +237,39 @@ const STORAGE_KEYS = {
 };
 
 export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ children }) => {
-  // Authentication is owned by Redux/Supabase; this remains for existing business display/audit consumers.
-  const currentUser = useAppSelector(selectCurrentUser);
+  // Authentication is owned by Redux/Supabase. The UI `User` shape is mapped
+  // from the real backend /auth/me response — display name comes from the
+  // users/me profile (display_name/first/last) and falls back to the
+  // Supabase-backed email. No hardcoded user names anywhere.
+  const apiUser = useAppSelector(selectCurrentUser);
+  const currentUser = useMemo<User | null>(() => {
+    if (!apiUser) return null;
+    const profile = (apiUser.profile ?? {}) as Record<string, unknown>;
+    const displayName =
+      (typeof profile.display_name === 'string' && profile.display_name) ||
+      [profile.first_name, profile.last_name]
+        .filter((p): p is string => typeof p === 'string' && p.length > 0)
+        .join(' ') ||
+      (typeof apiUser.email === 'string' ? apiUser.email.split('@')[0] : '');
+    return {
+      id: apiUser.id,
+      name: displayName,
+      email: apiUser.email ?? '',
+      role: 'Owner',
+    } as User;
+  }, [apiUser]);
 
   const dispatch = useAppDispatch();
-  // Real backend organization state (Redux). Falls back to mock data only
-  // while the API data has not loaded (e.g. offline dev), never merged.
+  // Real backend organization state (Redux) only — no mock organizations.
+  // While the list is loading or has failed, there is no current organization
+  // and the app shows onboarding/create-organization, never a fake tenant.
   const orgState = useAppSelector((state) => state.organizations);
-  const hasApiOrgs = orgState.items.length > 0 || orgState.status === 'succeeded';
-  const organizations = hasApiOrgs
-    ? orgState.items.map(toUiOrganization)
-    : INITIAL_ORGANIZATIONS;
-  const currentOrg = hasApiOrgs
-    ? (orgState.items.find((o) => o.id === orgState.activeOrganizationId)
-        ? toUiOrganization(
-            orgState.items.find((o) => o.id === orgState.activeOrganizationId)!,
-          )
-        : null)
-    : organizations[0] || null;
+  const organizations = orgState.items.map(toUiOrganization);
+  const currentOrg = orgState.items.find((o) => o.id === orgState.activeOrganizationId)
+    ? toUiOrganization(
+        orgState.items.find((o) => o.id === orgState.activeOrganizationId)!,
+      )
+    : null;
 
   // Customer and vendor masters come from the backend via the customers/
   // vendors Redux slices (GET /customers, GET /vendors). The backend's
@@ -493,7 +507,7 @@ export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     const newTx: Transaction = {
       ...txData,
       id: `tx_${Date.now()}`,
-      orgId: currentOrg?.id || 'org_acme',
+      orgId: currentOrg?.id || '',
     };
     setTransactions((prev) => [newTx, ...prev]);
     addAuditEntry('Recorded Transaction', 'Transactions', `${newTx.type}: ${newTx.description}`);
@@ -547,45 +561,47 @@ export const AccountingProvider: React.FC<{ children: React.ReactNode }> = ({ ch
     addAuditEntry('Document OCR Action', 'AI Assistant', `${action} extracted document: ${doc.fileName}`);
   };
 
+  // Mark-as-read dispatches the real backend thunk. Requests are only sent
+  // with a real authenticated user AND a real active organization — never a
+  // placeholder id (the backend validates the tenant header and membership).
+  // The thunks are imported aliased (…Thunk) because these context helpers
+  // intentionally expose the same names to consumers.
   const markNotificationRead = (id: string) => {
-    // Dispatch the mark notification as read thunk
-    // Note: We need organizationId and userId for the thunk
-    // For now, we'll get them from Redux state or fallback to defaults
-    // In a real implementation, these would come from the current context
-    const userId = currentUser?.id || 'user_placeholder';
-    const orgId = activeOrganizationId || 'org_placeholder';
-    if (userId && orgId) {
-      dispatch(markNotificationRead({ organizationId: orgId, userId: userId, notificationId: id }));
-    }
+    if (!currentUser || !activeOrganizationId) return;
+    dispatch(
+      markNotificationReadThunk({
+        organizationId: activeOrganizationId,
+        userId: currentUser.id,
+        notificationId: id,
+      }),
+    );
   };
 
   const markAllNotificationsRead = () => {
-    // Dispatch the mark all notifications as read thunk
-    // Note: We need organizationId and userId for the thunk
-    // For now, we'll get them from Redux state or fallback to defaults
-    // In a real implementation, these would come from the current context
-    const userId = currentUser?.id || 'user_placeholder';
-    const orgId = activeOrganizationId || 'org_placeholder';
-    if (userId && orgId) {
-      dispatch(markAllNotificationsRead({ organizationId: orgId, userId: userId }));
-    }
+    if (!currentUser || !activeOrganizationId) return;
+    dispatch(
+      markAllNotificationsReadThunk({
+        organizationId: activeOrganizationId,
+        userId: currentUser.id,
+      }),
+    );
   };
 
   // Tenant Scoped Data Slices
-  const activeOrgId = currentOrg?.id || 'unassigned';
+  const activeOrgId = currentOrg?.id || '';
 
-  const orgInvoices = invoices.filter((i) => (i.orgId || 'org_acme') === activeOrgId);
-  const orgTransactions = transactions.filter((t) => (t.orgId || 'org_acme') === activeOrgId);
-  const orgExpenses = expenses.filter((e) => (e.orgId || 'org_acme') === activeOrgId);
-  const orgCustomers = customers.filter((c) => (c.orgId || 'org_acme') === activeOrgId);
-  const orgVendors = vendors.filter((v) => (v.orgId || 'org_acme') === activeOrgId);
-  const orgBankAccounts = bankAccounts.filter((b) => (b.orgId || 'org_acme') === activeOrgId);
+  const orgInvoices = invoices.filter((i) => (i.orgId || '') === activeOrgId);
+  const orgTransactions = transactions.filter((t) => (t.orgId || '') === activeOrgId);
+  const orgExpenses = expenses.filter((e) => (e.orgId || '') === activeOrgId);
+  const orgCustomers = customers.filter((c) => (c.orgId || '') === activeOrgId);
+  const orgVendors = vendors.filter((v) => (v.orgId || '') === activeOrgId);
+  const orgBankAccounts = bankAccounts.filter((b) => (b.orgId || '') === activeOrgId);
   const orgBankFeeds = bankFeeds.filter((f) => orgBankAccounts.some(ba => ba.id === f.bankAccountId));
   const orgBankStatementLines = bankStatementLines.filter((s) => orgBankAccounts.some(ba => ba.id === s.bankAccountId));
-  const orgReviewItems = reviewItems.filter((r) => (r.orgId || 'org_acme') === activeOrgId);
-  const orgInsights = insights.filter((i) => (i.orgId || 'org_acme') === activeOrgId);
-  const orgAuditLogs = auditLogs.filter((a) => (a.orgId || 'org_acme') === activeOrgId);
-  const orgNotifications = notificationsState.items.filter((n) => (n.orgId || 'org_acme') === activeOrgId || !n.orgId);
+  const orgReviewItems = reviewItems.filter((r) => (r.orgId || '') === activeOrgId);
+  const orgInsights = insights.filter((i) => (i.orgId || '') === activeOrgId);
+  const orgAuditLogs = auditLogs.filter((a) => (a.orgId || '') === activeOrgId);
+  const orgNotifications = notificationsState.items.filter((n) => (n.orgId || '') === activeOrgId || !n.orgId);
   const orgDocuments = documents.filter((d: any) => !d.orgId || d.orgId === activeOrgId);
 
   // Financial Metrics Computation per Organization

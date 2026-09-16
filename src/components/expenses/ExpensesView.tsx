@@ -107,7 +107,6 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({ navigate }) => {
       dispatch(fetchAccounts());
     }
   }, [activeOrganizationId, accountsState.status, dispatch]);
-
   // "View expense" → GET /expenses/:id to refresh items/status; the fulfilled
   // case upserts into the list so the drawer re-renders with fresh data.
   useEffect(() => {
@@ -485,11 +484,11 @@ export const ExpensesView: React.FC<ExpensesViewProps> = ({ navigate }) => {
         )}
         {(categoriesState.listStatus === 'failed' || accountsState.status === 'failed') && (
           <div className="text-[10px] font-mono text-red-600">
-            Could not load latest categories or accounts
+            Could not load categories or accounts
             {categoriesState.error?.message || accountsState.error
               ? ` (${categoriesState.error?.message ?? accountsState.error})`
               : ''}
-            — using built-in defaults.
+            .
           </div>
         )}
       </div>

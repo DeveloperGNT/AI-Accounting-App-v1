@@ -1,5 +1,10 @@
 import { createAsyncThunk, createSlice } from '@reduxjs/toolkit';
 import { productsApi } from '../../api/productsApi';
+import {
+  resetOnOrganizationChange,
+  selectOrganization,
+  clearOrganizations,
+} from '../organizations/organizationsSlice';
 import type { Product, ProductListResponse, CreateProductDto, UpdateProductDto } from '../../api/productsTypes';
 
 export interface ProductsState {
@@ -51,6 +56,9 @@ const productsSlice = createSlice({
   initialState,
   reducers: {},
   extraReducers: (builder) => {
+    // Tenant switch: drop the previous organization's products.
+    builder.addCase(selectOrganization, resetOnOrganizationChange);
+    builder.addCase(clearOrganizations, resetOnOrganizationChange);
     // Create
     builder.addCase(createProduct.pending, (state) => {
       state.loading = true;

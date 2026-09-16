@@ -45,25 +45,21 @@ export const TransactionsView: React.FC<TransactionsViewProps> = ({ navigate }) 
   const [journalBusyId, setJournalBusyId] = useState<string | null>(null);
 
   // Ledger accounts from GET /accounts feed the voucher "Bank / Cash Ledger"
-  // dropdown; the hardcoded fallbacks keep the form usable while loading or
-  // when the tenant has no accounts configured yet.
-  useEffect(() => {
-    dispatch(fetchAccounts());
-  }, [dispatch]);
-
-  const fallbackAccounts = [
-    'HDFC Current A/c (0060)',
-    'ICICI Bank Operating A/c',
-    'Cash on Hand (Petty Cash)',
-  ];
-  const accountOptions = Array.from(
-    new Set([
-      ...fallbackAccounts,
-      ...accountsState.items
-        .filter((a: any) => (a.status ?? 'ACTIVE').toUpperCase() === 'ACTIVE')
-        .map((a: any) => (a.code ? `${a.name} (${a.code})` : a.name) as string),
-    ]),
+  // dropdown. Real API data only — no fake accounts. Fetches wait for the
+  // active organization (TenantAccessGuard rejects headerless requests) and
+  // re-run when the tenant switches.
+  const activeOrganizationId = useAppSelector(
+    (state) => state.organizations.activeOrganizationId,
   );
+  useEffect(() => {
+    if (activeOrganizationId) {
+      dispatch(fetchAccounts());
+    }
+  }, [activeOrganizationId, dispatch]);
+
+  const accountOptions = accountsState.items
+    .filter((a: any) => (a.status ?? 'ACTIVE').toUpperCase() === 'ACTIVE')
+    .map((a: any) => (a.code ? `${a.name} (${a.code})` : a.name) as string);
 
   // Real journal entries (GET /journal-entries) back the "Journal" tab.
   useEffect(() => {

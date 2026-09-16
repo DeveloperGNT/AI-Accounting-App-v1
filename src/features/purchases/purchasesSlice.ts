@@ -1,5 +1,10 @@
 import { createAsyncThunk, createSlice } from '@reduxjs/toolkit';
 import { purchasesApi } from '../../api/purchasesApi';
+import {
+  resetOnOrganizationChange,
+  selectOrganization,
+  clearOrganizations,
+} from '../organizations/organizationsSlice';
 import type {
   PurchaseBill,
   CreatePurchaseBillDto,
@@ -84,6 +89,9 @@ const purchasesSlice = createSlice({
   initialState,
   reducers: {},
   extraReducers: (builder) => {
+    // Tenant switch: drop the previous organization's bills.
+    builder.addCase(selectOrganization, resetOnOrganizationChange);
+    builder.addCase(clearOrganizations, resetOnOrganizationChange);
     // Create (backend assigns billNumber DRAFT-<timestamp> and status DRAFT)
     builder.addCase(createBill.pending, (state) => {
       state.status = 'loading';

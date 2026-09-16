@@ -68,12 +68,19 @@ export const CatalogView: React.FC<CatalogViewProps> = () => {
 
   const [deletingId, setDeletingId] = useState<string | null>(null);
 
-  // Fetch the server lists once when the view mounts.
+  // Fetch the server lists once the active organization is resolved (the
+  // TenantAccessGuard rejects any request without x-organization-id) and
+  // refetch on tenant switch. Tenant-scoped slices self-reset on switch via
+  // resetOnOrganizationChange, so status returns to 'idle' and this re-runs.
+  const activeOrganizationId = useAppSelector(
+    (state) => state.organizations.activeOrganizationId,
+  );
   useEffect(() => {
+    if (!activeOrganizationId) return;
     dispatch(fetchProducts());
     dispatch(fetchCategories({ page: 1, limit: 100 }));
     dispatch(fetchAccounts());
-  }, [dispatch]);
+  }, [activeOrganizationId, dispatch]);
 
   const setProductField = (field: keyof typeof emptyProductForm) =>
     (e: React.ChangeEvent<HTMLInputElement | HTMLSelectElement>) =>

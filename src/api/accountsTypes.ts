@@ -1,17 +1,28 @@
+export type AccountStatus = 'ACTIVE' | 'INACTIVE';
+
 export interface Account {
   id: string;
-  // Add other fields as needed
-  [key: string]: any;
+  organizationId: string;
+  code: string;
+  name: string;
+  accountType: string;
+  status: AccountStatus;
+  createdAt: string;
+  updatedAt: string;
+  createdById?: string | null;
+  updatedById?: string | null;
 }
 
 export interface CreateAccountDto {
-  // Define fields required to create an account
-  [key: string]: any;
+  code: string;
+  name: string;
+  accountType: string;
 }
 
 export interface UpdateAccountDto {
-  // Fields for partial update
-  [key: string]: any;
+  code?: string;
+  name?: string;
+  accountType?: string;
 }
 
 export interface AccountListResponse {

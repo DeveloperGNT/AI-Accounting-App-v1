@@ -1,5 +1,10 @@
 import { createAsyncThunk, createSlice } from '@reduxjs/toolkit';
 import { expensesApi } from '../../api/expensesApi';
+import {
+  resetOnOrganizationChange,
+  selectOrganization,
+  clearOrganizations,
+} from '../organizations/organizationsSlice';
 import type {
   Expense,
   CreateExpenseDto,
@@ -105,6 +110,10 @@ const expensesSlice = createSlice({
   initialState,
   reducers: {},
   extraReducers: (builder) => {
+    // Tenant switch: drop the previous organization's rows so no stale data
+    // from another tenant is ever rendered or mixed into metrics.
+    builder.addCase(selectOrganization, resetOnOrganizationChange);
+    builder.addCase(clearOrganizations, resetOnOrganizationChange);
     // Create (backend assigns the immutable expense number + status DRAFT)
     builder.addCase(createExpense.pending, (state) => {
       state.status = 'loading';

@@ -1,5 +1,10 @@
 import { createAsyncThunk, createSlice } from '@reduxjs/toolkit';
 import { vendorPaymentsApi } from '../../api/vendorPaymentsApi';
+import {
+  resetOnOrganizationChange,
+  selectOrganization,
+  clearOrganizations,
+} from '../organizations/organizationsSlice';
 import type {
   VendorPayment,
   CreateVendorPaymentDto,
@@ -72,6 +77,9 @@ const vendorPaymentsSlice = createSlice({
   initialState,
   reducers: {},
   extraReducers: (builder) => {
+    // Tenant switch: drop the previous organization's vendor payments.
+    builder.addCase(selectOrganization, resetOnOrganizationChange);
+    builder.addCase(clearOrganizations, resetOnOrganizationChange);
     // Create (backend assigns paymentNumber and status DRAFT)
     builder.addCase(createVendorPayment.pending, (state) => {
       state.status = 'loading';

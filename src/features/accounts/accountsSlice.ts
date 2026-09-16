@@ -1,5 +1,10 @@
 import { createAsyncThunk, createSlice } from '@reduxjs/toolkit';
 import { accountsApi } from '../../api/accountsApi';
+import {
+  resetOnOrganizationChange,
+  selectOrganization,
+  clearOrganizations,
+} from '../organizations/organizationsSlice';
 import type { Account, CreateAccountDto, UpdateAccountDto, DeleteAccountResponse } from '../../api/accountsTypes';
 
 export interface AccountsState {
@@ -43,6 +48,9 @@ const accountsSlice = createSlice({
   initialState,
   reducers: {},
   extraReducers: (builder) => {
+    // Tenant switch: drop the previous organization's ledger accounts.
+    builder.addCase(selectOrganization, resetOnOrganizationChange);
+    builder.addCase(clearOrganizations, resetOnOrganizationChange);
     // Create
     builder.addCase(createAccount.pending, (state) => { state.status = 'loading'; state.error = undefined; });
     builder.addCase(createAccount.fulfilled, (state, action) => { state.status = 'succeeded'; state.items.push(action.payload as Account); });

@@ -17,6 +17,9 @@ interface OrganizationsState {
   status: RequestStatus;
   currentStatus: RequestStatus;
   error: ApiError | null;
+  // Incremented on tenant switch so tenant-scoped slices can key their reset
+  // off a single monotonic value (see resetOnOrganizationChange in each slice).
+  organizationDataEpoch: number;
 }
 
 const initialState: OrganizationsState = {
@@ -26,6 +29,7 @@ const initialState: OrganizationsState = {
   status: 'idle',
   currentStatus: 'idle',
   error: null,
+  organizationDataEpoch: 0,
 };
 
 export const fetchOrganizations = createAsyncThunk<
@@ -101,6 +105,12 @@ const organizationsSlice = createSlice({
       state.currentStatus = 'succeeded';
       state.error = null;
       setActiveOrganizationId(action.payload);
+
+      // Organization-scoped slices hold the previous tenant's rows. Reset
+      // their list state so every consumer re-fetches fresh data for the new
+      // tenant (the per-view useEffects re-dispatch once activeOrganizationId
+      // changes and the slice status is back to 'idle').
+      state.organizationDataEpoch = (state.organizationDataEpoch ?? 0) + 1;
     },
     clearOrganizations(state) {
       state.items = [];
@@ -192,4 +202,30 @@ const organizationsSlice = createSlice({
 });
 
 export const { selectOrganization, clearOrganizations } = organizationsSlice.actions;
+
+/**
+ * Shared case reducer: clears a tenant-scoped slice whenever the active
+ * organization changes or is cleared. Prevents rows from one tenant bleeding
+ * into another after a switch (each view then re-fetches for the new tenant).
+ */
+export const resetOnOrganizationChange = <T extends { items?: unknown[]; error?: unknown; status?: string; list?: unknown[]; listStatus?: string }>(
+  state: T,
+) => {
+  if (Array.isArray(state.items)) {
+    state.items = [];
+  }
+  if ('list' in state && Array.isArray((state as { list?: unknown[] }).list)) {
+    (state as { list: unknown[] }).list = [];
+  }
+  if ('status' in state) {
+    (state as { status: string }).status = 'idle';
+  }
+  if ('listStatus' in state) {
+    (state as { listStatus: string }).listStatus = 'idle';
+  }
+  if ('error' in state) {
+    (state as { error: unknown }).error = undefined;
+  }
+};
+
 export default organizationsSlice.reducer;
